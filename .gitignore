@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+dist/
+build/
+out/
+
+# Foundry
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Misc
+*.tmp
+*.temp
+.cache/
