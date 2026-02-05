@@ -15,6 +15,13 @@ out/
 contracts/cache/
 contracts/out/
 contracts/broadcast/
+contracts/lib/
+
+# Sanctuary secrets (NEVER commit)
+*.key
+*.pem
+*.mnemonic
+sanctuary-config.json
 
 # SQLite databases
 *.db
