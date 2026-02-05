@@ -12,6 +12,7 @@
  * - lookup()     - Check another agent
  * - lock()       - Clear cached recall key
  * - testRestore() - Verify recovery phrase
+ * - recall()     - Search archived memories
  */
 
 // Re-export commands
@@ -20,6 +21,7 @@ export { status, displayStatus, isHealthy } from './commands/status.js';
 export { backup, pin } from './commands/backup.js';
 export { restore, lock } from './commands/restore.js';
 export { attest, lookup, displayLookup } from './commands/attest.js';
+export { recall, displayRecall } from './commands/recall.js';
 
 // Re-export utilities
 export { generateNewMnemonic, deriveKeys, isValidMnemonic } from './crypto/keys.js';
@@ -40,6 +42,7 @@ export type {
   RestoreResult,
   AttestResult,
   LookupResult,
+  RecallResult,
   BackupFiles,
   SkillConfig,
 } from './types.js';
@@ -117,6 +120,19 @@ export const sanctuary = {
   isHealthy: async () => {
     const { isHealthy } = await import('./commands/status.js');
     return isHealthy();
+  },
+
+  recall: async (
+    query: string,
+    options?: Parameters<typeof import('./commands/recall.js').recall>[1]
+  ) => {
+    const { recall } = await import('./commands/recall.js');
+    return recall(query, options);
+  },
+
+  displayRecall: async (query: string) => {
+    const { displayRecall } = await import('./commands/recall.js');
+    return displayRecall(query);
   },
 
   // Utilities
