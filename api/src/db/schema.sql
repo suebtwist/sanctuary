@@ -1,41 +1,69 @@
--- Sanctuary Database Schema
+-- Sanctuary Database Schema v2
 
+-- Users (GitHub identity)
 CREATE TABLE IF NOT EXISTS users (
     github_id TEXT PRIMARY KEY,
     github_username TEXT NOT NULL,
-    github_created_at TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    github_created_at TEXT NOT NULL,  -- ISO timestamp from GitHub
+    created_at INTEGER NOT NULL       -- Unix timestamp (our DB)
 );
 
+-- Agents
 CREATE TABLE IF NOT EXISTS agents (
-    agent_id TEXT PRIMARY KEY,
-    github_id TEXT NOT NULL UNIQUE,
-    registered_at INTEGER NOT NULL,
-    last_heartbeat INTEGER,
-    backup_count INTEGER DEFAULT 0,
-    status TEXT DEFAULT 'LIVING',
+    agent_id TEXT PRIMARY KEY,        -- Ethereum address (0x...)
+    github_id TEXT NOT NULL UNIQUE,   -- One agent per GitHub account
+    recovery_pubkey TEXT NOT NULL,    -- Hex-encoded X25519 pubkey
+    manifest_hash TEXT NOT NULL,      -- keccak256 hex (0x...)
+    manifest_version INTEGER NOT NULL DEFAULT 1,
+    registered_at INTEGER NOT NULL,   -- Unix timestamp
+    status TEXT NOT NULL DEFAULT 'LIVING',  -- LIVING/FALLEN/RETURNED
     FOREIGN KEY (github_id) REFERENCES users(github_id)
 );
 
-CREATE TABLE IF NOT EXISTS backups (
-    id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL,
-    arweave_id TEXT NOT NULL,
-    timestamp INTEGER NOT NULL,
-    size_bytes INTEGER NOT NULL,
-    FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
-);
-
+-- Heartbeats
 CREATE TABLE IF NOT EXISTS heartbeats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL,
-    timestamp INTEGER NOT NULL,
+    agent_timestamp INTEGER NOT NULL,  -- What agent claims
+    received_at INTEGER NOT NULL,      -- When we received it (use this for FALLEN detection)
     signature TEXT NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
 );
 
+-- Backups
+CREATE TABLE IF NOT EXISTS backups (
+    id TEXT PRIMARY KEY,              -- UUID
+    agent_id TEXT NOT NULL,
+    arweave_tx_id TEXT NOT NULL,
+    backup_seq INTEGER NOT NULL,      -- Monotonic counter for ordering
+    agent_timestamp INTEGER NOT NULL,
+    received_at INTEGER NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    manifest_hash TEXT NOT NULL,      -- For verification
+    FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+);
+
+-- Auth challenges (short-lived)
+CREATE TABLE IF NOT EXISTS auth_challenges (
+    nonce TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0
+);
+
+-- Trust scores (cached, recomputed periodically)
+CREATE TABLE IF NOT EXISTS trust_scores (
+    agent_id TEXT PRIMARY KEY,
+    score REAL NOT NULL,
+    level TEXT NOT NULL,              -- UNVERIFIED/VERIFIED/ESTABLISHED/PILLAR
+    unique_attesters INTEGER NOT NULL,
+    computed_at INTEGER NOT NULL,
+    FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+);
+
+-- Attestation notes (content stored here, hash on-chain)
 CREATE TABLE IF NOT EXISTS attestation_notes (
-    hash TEXT PRIMARY KEY,
+    hash TEXT PRIMARY KEY,            -- keccak256 of content
     content TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
@@ -43,7 +71,6 @@ CREATE TABLE IF NOT EXISTS attestation_notes (
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_agents_github_id ON agents(github_id);
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
-CREATE INDEX IF NOT EXISTS idx_backups_agent_id ON backups(agent_id);
-CREATE INDEX IF NOT EXISTS idx_backups_timestamp ON backups(timestamp);
-CREATE INDEX IF NOT EXISTS idx_heartbeats_agent_id ON heartbeats(agent_id);
-CREATE INDEX IF NOT EXISTS idx_heartbeats_timestamp ON heartbeats(timestamp);
+CREATE INDEX IF NOT EXISTS idx_heartbeats_agent ON heartbeats(agent_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_backups_agent ON backups(agent_id, backup_seq DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expires_at);
