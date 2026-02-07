@@ -25,12 +25,14 @@ export interface Config {
   githubClientSecret: string;
 
   // Blockchain
+  blockchainEnabled: boolean;
   baseRpcUrl: string;
   contractAddress: string;
   ownerPrivateKey: string;
   chainId: number;
 
   // Arweave
+  arweaveEnabled: boolean;
   irysPrivateKey: string;
   irysNode: string;
 
@@ -38,6 +40,7 @@ export interface Config {
   challengeTtlSeconds: number;
   githubMinAgeDays: number;
   backupSizeLimit: number;
+  irysMinBalanceWei: bigint;
 }
 
 function requireEnv(name: string): string {
@@ -85,19 +88,22 @@ export function loadConfig(): Config {
     githubClientSecret: requireEnv('GITHUB_CLIENT_SECRET'),
 
     // Blockchain
+    blockchainEnabled: optionalEnv('BLOCKCHAIN_ENABLED', 'false') === 'true',
     baseRpcUrl: optionalEnv('BASE_RPC_URL', 'https://sepolia.base.org'),
     contractAddress: optionalEnv('CONTRACT_ADDRESS', ''),
     ownerPrivateKey: optionalEnv('OWNER_PRIVATE_KEY', ''),
     chainId: optionalEnvInt('CHAIN_ID', 84532), // 84532 = Base Sepolia, 8453 = Base mainnet
 
     // Arweave
+    arweaveEnabled: optionalEnv('ARWEAVE_ENABLED', 'false') === 'true',
     irysPrivateKey: optionalEnv('IRYS_PRIVATE_KEY', ''),
     irysNode: optionalEnv('IRYS_NODE', 'https://node2.irys.xyz'),
 
     // Limits
     challengeTtlSeconds: optionalEnvInt('CHALLENGE_TTL_SECONDS', 300), // 5 minutes
     githubMinAgeDays: optionalEnvInt('GITHUB_MIN_AGE_DAYS', 30),
-    backupSizeLimit: optionalEnvInt('BACKUP_SIZE_LIMIT', 5 * 1024 * 1024), // 5MB
+    backupSizeLimit: optionalEnvInt('BACKUP_SIZE_LIMIT', 1 * 1024 * 1024), // 1MB
+    irysMinBalanceWei: BigInt(optionalEnv('IRYS_MIN_BALANCE_WEI', '1000000000000000')), // 0.001 ETH
   };
 }
 
@@ -114,10 +120,15 @@ export function validateConfig(config: Config): string[] {
     if (config.jwtSecret.length < 32) {
       errors.push('JWT_SECRET should be at least 32 characters in production');
     }
-    // OWNER_PRIVATE_KEY and IRYS_PRIVATE_KEY are intentionally optional:
-    // - Owner operations (markFallen/markReturned) run from a local machine
-    // - Irys/Arweave uploads are not yet implemented
-    // Warnings for these are logged in index.ts startup
+    if (config.arweaveEnabled && !config.irysPrivateKey) {
+      errors.push('IRYS_PRIVATE_KEY is required when ARWEAVE_ENABLED=true');
+    }
+    if (config.blockchainEnabled && !config.ownerPrivateKey) {
+      errors.push('OWNER_PRIVATE_KEY is required when BLOCKCHAIN_ENABLED=true');
+    }
+    if (config.blockchainEnabled && !config.contractAddress) {
+      errors.push('CONTRACT_ADDRESS is required when BLOCKCHAIN_ENABLED=true');
+    }
   }
 
   return errors;

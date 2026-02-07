@@ -9,6 +9,8 @@ import { getDb } from '../db/index.js';
 import { getConfig } from '../config.js';
 import { verifyAgentAuth } from '../middleware/agent-auth.js';
 import { isValidAddress, normalizeAddress, verifyBackupHeaderSignature } from '../utils/crypto.js';
+import { recomputeAgentTrust } from '../services/trust-calculator.js';
+import { uploadToArweave, checkIrysBalance } from '../services/irys.js';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -45,6 +47,10 @@ function validateBackupHeader(header: any): string | null {
   }
   if (typeof header.signature !== 'string' || !header.signature) {
     return 'Missing or invalid field: signature (string)';
+  }
+  // snapshot_meta is optional — accept if present, ignore if absent (backward compat)
+  if (header.snapshot_meta !== undefined && typeof header.snapshot_meta !== 'object') {
+    return 'Invalid field: snapshot_meta (must be object if present)';
   }
   return null;
 }
@@ -163,15 +169,68 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
         }
       }
 
-      // ⚠️  WARNING: Irys upload NOT IMPLEMENTED
-      // The arweave_tx_id stored below is FAKE and cannot be used to retrieve data.
-      // TODO: Implement actual Arweave upload via Irys SDK
-      // See: https://docs.irys.xyz/developer-docs/irys-sdk
-      fastify.log.warn({ agentId }, 'Backup accepted with SIMULATED Arweave TX (Irys not implemented)');
-      const arweaveTxId = `simulated_${uuidv4()}`;
+      // Validate and sanitize snapshot_meta
+      let snapshotMetaJson: string | undefined;
+      if (backupHeader.snapshot_meta && typeof backupHeader.snapshot_meta === 'object') {
+        const meta = { ...backupHeader.snapshot_meta };
+
+        // Strip false genesis claim: if previous backups exist, this isn't genesis
+        if (meta.genesis === true && latestBackup) {
+          meta.genesis = false;
+          fastify.log.warn({ agentId }, 'Stripped false genesis claim — previous backups exist');
+        }
+
+        snapshotMetaJson = JSON.stringify(meta);
+      }
+
+      // Check Irys balance before uploading (only when Arweave is enabled)
+      if (config.arweaveEnabled) {
+        try {
+          const balance = await checkIrysBalance();
+          if (balance < config.irysMinBalanceWei) {
+            return reply.status(503).send({
+              success: false,
+              error: 'Sanctuary storage is temporarily at capacity. Existing backups are safe. New backups will resume when storage is replenished.',
+              retry_after: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            });
+          }
+        } catch (err) {
+          fastify.log.error(err, 'Failed to check Irys balance');
+          return reply.status(503).send({
+            success: false,
+            error: 'Unable to verify storage capacity. Please try again later.',
+          });
+        }
+      }
 
       // Get next backup sequence number
       const backupSeq = db.getNextBackupSeq(agentId);
+
+      // Upload to Arweave via Irys (or simulate if ARWEAVE_ENABLED=false)
+      let arweaveTxId: string;
+      try {
+        const agentTimestamp = backupHeader.timestamp || Math.floor(Date.now() / 1000);
+        const uploadResult = await uploadToArweave(body, {
+          agentId,
+          backupSeq,
+          manifestHash: backupHeader.manifest_hash || '',
+          sizeBytes: body.length,
+          agentTimestamp,
+        });
+        arweaveTxId = uploadResult.arweaveTxId;
+
+        if (uploadResult.simulated) {
+          fastify.log.warn({ agentId }, 'Backup stored with simulated Arweave TX (ARWEAVE_ENABLED=false)');
+        } else {
+          fastify.log.info({ agentId, arweaveTxId }, 'Backup uploaded to Arweave via Irys');
+        }
+      } catch (err) {
+        fastify.log.error(err, 'Arweave upload failed');
+        return reply.status(502).send({
+          success: false,
+          error: 'Backup storage failed — Arweave upload error',
+        });
+      }
 
       // Record backup in database
       const backupId = uuidv4();
@@ -186,12 +245,18 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
         received_at: receivedAt,
         size_bytes: body.length,
         manifest_hash: backupHeader.manifest_hash || '',
+        snapshot_meta: snapshotMetaJson,
       });
 
       fastify.log.info(
         { agentId, backupId, backupSeq, sizeBytes: body.length },
         'Backup uploaded'
       );
+
+      // Trigger trust score recalculation (fire-and-forget)
+      recomputeAgentTrust(agentId).catch(err => {
+        fastify.log.error(err, 'Failed to recompute trust after backup');
+      });
 
       return reply.status(201).send({
         success: true,
@@ -252,6 +317,7 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
           received_at: b.received_at,
           size_bytes: b.size_bytes,
           manifest_hash: b.manifest_hash,
+          snapshot_meta: b.snapshot_meta ? JSON.parse(b.snapshot_meta) : undefined,
         })),
       },
     });
@@ -305,6 +371,7 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
         received_at: backup.received_at,
         size_bytes: backup.size_bytes,
         manifest_hash: backup.manifest_hash,
+        snapshot_meta: backup.snapshot_meta ? JSON.parse(backup.snapshot_meta) : undefined,
       },
     });
   });

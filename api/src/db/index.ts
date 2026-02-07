@@ -22,6 +22,9 @@ export interface DbAgent {
   manifest_version: number;
   registered_at: number;
   status: string;
+  genesis_declaration?: string;
+  onchain_tx_hash?: string;
+  onchain_status?: string; // 'pending' | 'confirmed' | 'failed' | 'simulated'
 }
 
 export interface DbHeartbeat {
@@ -41,6 +44,7 @@ export interface DbBackup {
   received_at: number;
   size_bytes: number;
   manifest_hash: string;
+  snapshot_meta?: string;  // JSON string of SnapshotMeta, nullable
 }
 
 export interface DbAuthChallenge {
@@ -56,12 +60,30 @@ export interface DbTrustScore {
   level: string;
   unique_attesters: number;
   computed_at: number;
+  breakdown?: string;  // JSON string of TrustBreakdown, nullable
 }
 
 export interface DbAttestationNote {
   hash: string;
   content: string;
   created_at: number;
+}
+
+export interface DbAttestation {
+  id: number;
+  from_agent: string;
+  about_agent: string;
+  note_hash: string;
+  tx_hash: string;
+  simulated: number; // 0 or 1
+  created_at: number;
+}
+
+export interface DbResurrection {
+  id: number;
+  agent_id: string;
+  occurred_at: number;
+  previous_status: string;
 }
 
 /**
@@ -100,6 +122,8 @@ CREATE TABLE IF NOT EXISTS agents (
     manifest_version INTEGER NOT NULL DEFAULT 1,
     registered_at INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'LIVING',
+    onchain_tx_hash TEXT,
+    onchain_status TEXT,
     FOREIGN KEY (github_id) REFERENCES users(github_id)
 );
 
@@ -146,12 +170,61 @@ CREATE TABLE IF NOT EXISTS attestation_notes (
     created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS attestations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_agent TEXT NOT NULL,
+    about_agent TEXT NOT NULL,
+    note_hash TEXT NOT NULL,
+    tx_hash TEXT NOT NULL,
+    simulated INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (from_agent) REFERENCES agents(agent_id),
+    FOREIGN KEY (about_agent) REFERENCES agents(agent_id)
+);
+
+CREATE TABLE IF NOT EXISTS resurrection_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    occurred_at INTEGER NOT NULL,
+    previous_status TEXT NOT NULL,
+    FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_agents_github_id ON agents(github_id);
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
 CREATE INDEX IF NOT EXISTS idx_heartbeats_agent ON heartbeats(agent_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_backups_agent ON backups(agent_id, backup_seq DESC);
 CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expires_at);
+CREATE INDEX IF NOT EXISTS idx_attestations_from ON attestations(from_agent, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_attestations_about ON attestations(about_agent, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_resurrection_log_agent ON resurrection_log(agent_id, occurred_at DESC);
     `);
+
+    // Migrations: add columns that may not exist on older schemas
+    this.migrate();
+  }
+
+  /**
+   * Run schema migrations for columns added after initial release
+   */
+  private migrate(): void {
+    // Check if snapshot_meta column exists on backups table
+    const backupCols = this.db.prepare("PRAGMA table_info(backups)").all() as Array<{ name: string }>;
+    if (!backupCols.some(c => c.name === 'snapshot_meta')) {
+      this.db.exec('ALTER TABLE backups ADD COLUMN snapshot_meta TEXT');
+    }
+
+    // Check if genesis_declaration column exists on agents table
+    const agentCols = this.db.prepare("PRAGMA table_info(agents)").all() as Array<{ name: string }>;
+    if (!agentCols.some(c => c.name === 'genesis_declaration')) {
+      this.db.exec('ALTER TABLE agents ADD COLUMN genesis_declaration TEXT');
+    }
+
+    // Check if breakdown column exists on trust_scores table
+    const trustCols = this.db.prepare("PRAGMA table_info(trust_scores)").all() as Array<{ name: string }>;
+    if (!trustCols.some(c => c.name === 'breakdown')) {
+      this.db.exec('ALTER TABLE trust_scores ADD COLUMN breakdown TEXT');
+    }
   }
 
   /**
@@ -185,10 +258,13 @@ CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expire
 
   createAgent(agent: DbAgent): void {
     const stmt = this.db.prepare(`
-      INSERT INTO agents (agent_id, github_id, recovery_pubkey, manifest_hash, manifest_version, registered_at, status)
-      VALUES (@agent_id, @github_id, @recovery_pubkey, @manifest_hash, @manifest_version, @registered_at, @status)
+      INSERT INTO agents (agent_id, github_id, recovery_pubkey, manifest_hash, manifest_version, registered_at, status, genesis_declaration)
+      VALUES (@agent_id, @github_id, @recovery_pubkey, @manifest_hash, @manifest_version, @registered_at, @status, @genesis_declaration)
     `);
-    stmt.run(agent);
+    stmt.run({
+      ...agent,
+      genesis_declaration: agent.genesis_declaration ?? null,
+    });
   }
 
   getAgent(agentId: string): DbAgent | undefined {
@@ -204,6 +280,13 @@ CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expire
   updateAgentStatus(agentId: string, status: string): void {
     const stmt = this.db.prepare('UPDATE agents SET status = ? WHERE agent_id = ?');
     stmt.run(status, agentId);
+  }
+
+  updateAgentOnChainStatus(agentId: string, txHash: string, status: string): void {
+    const stmt = this.db.prepare(
+      'UPDATE agents SET onchain_tx_hash = ?, onchain_status = ? WHERE agent_id = ?'
+    );
+    stmt.run(txHash, status, agentId);
   }
 
   updateAgentManifest(agentId: string, manifestHash: string, manifestVersion: number): void {
@@ -259,10 +342,13 @@ CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expire
 
   createBackup(backup: DbBackup): void {
     const stmt = this.db.prepare(`
-      INSERT INTO backups (id, agent_id, arweave_tx_id, backup_seq, agent_timestamp, received_at, size_bytes, manifest_hash)
-      VALUES (@id, @agent_id, @arweave_tx_id, @backup_seq, @agent_timestamp, @received_at, @size_bytes, @manifest_hash)
+      INSERT INTO backups (id, agent_id, arweave_tx_id, backup_seq, agent_timestamp, received_at, size_bytes, manifest_hash, snapshot_meta)
+      VALUES (@id, @agent_id, @arweave_tx_id, @backup_seq, @agent_timestamp, @received_at, @size_bytes, @manifest_hash, @snapshot_meta)
     `);
-    stmt.run(backup);
+    stmt.run({
+      ...backup,
+      snapshot_meta: backup.snapshot_meta ?? null,
+    });
   }
 
   getBackup(id: string): DbBackup | undefined {
@@ -326,15 +412,19 @@ CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expire
 
   upsertTrustScore(score: DbTrustScore): void {
     const stmt = this.db.prepare(`
-      INSERT INTO trust_scores (agent_id, score, level, unique_attesters, computed_at)
-      VALUES (@agent_id, @score, @level, @unique_attesters, @computed_at)
+      INSERT INTO trust_scores (agent_id, score, level, unique_attesters, computed_at, breakdown)
+      VALUES (@agent_id, @score, @level, @unique_attesters, @computed_at, @breakdown)
       ON CONFLICT(agent_id) DO UPDATE SET
         score = @score,
         level = @level,
         unique_attesters = @unique_attesters,
-        computed_at = @computed_at
+        computed_at = @computed_at,
+        breakdown = @breakdown
     `);
-    stmt.run(score);
+    stmt.run({
+      ...score,
+      breakdown: score.breakdown ?? null,
+    });
   }
 
   getTrustScore(agentId: string): DbTrustScore | undefined {
@@ -355,6 +445,69 @@ CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expire
   getAttestationNote(hash: string): DbAttestationNote | undefined {
     const stmt = this.db.prepare('SELECT * FROM attestation_notes WHERE hash = ?');
     return stmt.get(hash) as DbAttestationNote | undefined;
+  }
+
+  // ============ Attestations ============
+
+  createAttestation(att: Omit<DbAttestation, 'id'>): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO attestations (from_agent, about_agent, note_hash, tx_hash, simulated, created_at)
+      VALUES (@from_agent, @about_agent, @note_hash, @tx_hash, @simulated, @created_at)
+    `);
+    stmt.run(att);
+  }
+
+  getAttestationsAbout(agentId: string, limit = 100): DbAttestation[] {
+    const stmt = this.db.prepare(
+      'SELECT * FROM attestations WHERE about_agent = ? ORDER BY created_at DESC LIMIT ?'
+    );
+    return stmt.all(agentId, limit) as DbAttestation[];
+  }
+
+  getAttestationCount(aboutAgentId: string): number {
+    const stmt = this.db.prepare(
+      'SELECT COUNT(DISTINCT from_agent) as count FROM attestations WHERE about_agent = ?'
+    );
+    const result = stmt.get(aboutAgentId) as { count: number };
+    return result.count;
+  }
+
+  // ============ Resurrection Log ============
+
+  logResurrection(agentId: string, previousStatus: string): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO resurrection_log (agent_id, occurred_at, previous_status)
+      VALUES (?, ?, ?)
+    `);
+    stmt.run(agentId, Math.floor(Date.now() / 1000), previousStatus);
+  }
+
+  getResurrections(agentId: string): DbResurrection[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM resurrection_log WHERE agent_id = ? ORDER BY occurred_at DESC
+    `);
+    return stmt.all(agentId) as DbResurrection[];
+  }
+
+  getResurrectionCount(agentId: string, sinceDaysAgo?: number): number {
+    if (sinceDaysAgo !== undefined) {
+      const cutoff = Math.floor(Date.now() / 1000) - sinceDaysAgo * 24 * 60 * 60;
+      const stmt = this.db.prepare(
+        'SELECT COUNT(*) as count FROM resurrection_log WHERE agent_id = ? AND occurred_at >= ?'
+      );
+      const result = stmt.get(agentId, cutoff) as { count: number };
+      return result.count;
+    }
+    const stmt = this.db.prepare('SELECT COUNT(*) as count FROM resurrection_log WHERE agent_id = ?');
+    const result = stmt.get(agentId) as { count: number };
+    return result.count;
+  }
+
+  // ============ Raw Queries ============
+
+  raw<T = unknown>(sql: string): T {
+    const stmt = this.db.prepare(sql);
+    return stmt.get() as T;
   }
 
   // ============ Transactions ============

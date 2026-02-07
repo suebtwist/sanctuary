@@ -22,13 +22,22 @@ const RECALL_CACHE_FILE = 'recall-cache.json';
 /**
  * Stored agent data (secrets should be encrypted in production)
  */
+export interface GenesisCompleteness {
+  declaration: boolean;      // did they provide a genesis declaration?
+  first_backup: boolean;     // did the auto-backup succeed?
+  attestation_seed: boolean; // did they seed an attestation?
+}
+
 export interface StoredAgent {
   agentId: string;
   agentSecretHex: string;      // Hex-encoded secp256k1 private key
-  recoveryPubKeyHex: string;   // Hex-encoded X25519 public key
+  recoveryPubKeyHex: string;   // Hex-encoded X25519 recovery public key
+  recallPubKeyHex: string;     // Hex-encoded X25519 recall public key
   manifestHash: string;
   manifestVersion: number;
   registeredAt: number;
+  genesisDeclaration?: string;
+  genesisCompleteness?: GenesisCompleteness;
 }
 
 /**
@@ -47,6 +56,9 @@ export interface SanctuaryConfig {
   apiUrl: string;
   chainId: number;
   contractAddress: string;
+  baseRpcUrl: string;
+  model?: string;
+  platform?: string;
 }
 
 /**
@@ -107,10 +119,13 @@ function deleteFile(filename: string): void {
  */
 export function getConfig(): SanctuaryConfig {
   const stored = readJson<Partial<SanctuaryConfig>>(CONFIG_FILE);
+  const chainId = stored?.chainId || 84532; // Base Sepolia
   return {
     apiUrl: stored?.apiUrl || process.env.SANCTUARY_API_URL || 'http://localhost:3000',
-    chainId: stored?.chainId || 84532, // Base Sepolia
+    chainId,
     contractAddress: stored?.contractAddress || '',
+    baseRpcUrl: stored?.baseRpcUrl || process.env.BASE_RPC_URL ||
+      (chainId === 8453 ? 'https://mainnet.base.org' : 'https://sepolia.base.org'),
   };
 }
 
@@ -146,6 +161,23 @@ export function saveAgent(agent: StoredAgent): void {
  */
 export function deleteAgent(): void {
   deleteFile(AGENT_FILE);
+}
+
+/**
+ * Update genesis completeness flags on the stored agent
+ */
+export function updateGenesisCompleteness(updates: Partial<GenesisCompleteness>): void {
+  const agent = getStoredAgent();
+  if (!agent) return;
+
+  const current = agent.genesisCompleteness || {
+    declaration: false,
+    first_backup: false,
+    attestation_seed: false,
+  };
+
+  agent.genesisCompleteness = { ...current, ...updates };
+  writeJson(AGENT_FILE, agent);
 }
 
 /**

@@ -40,6 +40,15 @@ export interface TrustScore {
   computedAt: number;
 }
 
+export interface SnapshotMeta {
+  model?: string;                // e.g. "claude-opus-4-5" (self-reported)
+  platform?: string;             // e.g. "openclaw"
+  platform_version?: string;
+  genesis?: boolean;             // true only for the very first backup after registration
+  genesis_declaration?: string;  // agent's answer to "who are you, what do you want to survive?"
+  session_number?: number;       // agent-tracked session counter
+}
+
 export interface BackupHeader {
   version: string;
   agent_id: string;
@@ -52,6 +61,7 @@ export interface BackupHeader {
   files: Record<string, BackupFileMetadata>;
   wrapped_keys: { recovery: string; recall: string };
   signature: string;
+  snapshot_meta?: SnapshotMeta;
 }
 
 export interface BackupFileMetadata {
@@ -153,6 +163,11 @@ export const TRUST_THRESHOLDS = {
 
 export const BACKUP_SIZE_LIMIT = 5 * 1024 * 1024;
 export const GITHUB_MIN_AGE_DAYS = 30;
+
+export const WELL_KNOWN_FILES = {
+  SOUL: 'soul.md',
+  MEMORY: 'memory.md',
+} as const;
 
 // ============ Skill-specific Types ============
 

@@ -9,6 +9,7 @@
  * - status()     - Show current status
  * - backup()     - Upload encrypted backup
  * - restore()    - Recover from mnemonic
+ * - resurrect()  - Total-loss resurrection (mnemonic → API status transition → restore)
  * - attest()     - Vouch for another agent
  * - lookup()     - Check another agent
  * - lock()       - Clear cached recall key
@@ -22,6 +23,7 @@ export { setup, testRestore } from './commands/setup.js';
 export { status, displayStatus, isHealthy } from './commands/status.js';
 export { backup, pin } from './commands/backup.js';
 export { restore, lock } from './commands/restore.js';
+export { resurrect } from './commands/resurrect.js';
 export { attest, lookup, displayLookup } from './commands/attest.js';
 export { recall, displayRecall } from './commands/recall.js';
 export { prove, displayProve } from './commands/prove.js';
@@ -95,6 +97,14 @@ export const sanctuary = {
   lock: () => {
     const { lock } = require('./commands/restore.js');
     return lock();
+  },
+
+  resurrect: async (
+    mnemonic: string,
+    options?: Parameters<typeof import('./commands/resurrect.js').resurrect>[1]
+  ) => {
+    const { resurrect } = await import('./commands/resurrect.js');
+    return resurrect(mnemonic, options);
   },
 
   attest: async (

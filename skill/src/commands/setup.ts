@@ -1,17 +1,19 @@
 /**
- * Sanctuary Setup Command
+ * Sanctuary Setup Command — Genesis Ritual
  *
  * First-time registration flow:
  * 1. GitHub OAuth (device flow)
- * 2. Generate mnemonic → derive keys
- * 3. Register agent on-chain
- * 4. Store agent keys locally
+ * 2. Genesis Declaration (optional — "Who are you?")
+ * 3. Generate mnemonic → derive keys (with ritual framing)
+ * 4. Register agent with API (anchoring)
+ * 5. Auto-trigger first backup with genesis metadata
+ * 6. Optional attestation seed
  *
  * CRITICAL: Recovery phrase is shown ONCE and must be saved by user!
  */
 
 import { generateNewMnemonic, deriveKeys, toHex } from '../crypto/keys.js';
-import { signRegistration, computeManifestHash } from '../crypto/sign.js';
+import { computeManifestHash, signRegistration } from '../crypto/sign.js';
 import { createApiClient } from '../services/api.js';
 import {
   getConfig,
@@ -19,8 +21,10 @@ import {
   saveAgent,
   hasAgent,
   getStoredAgent,
+  updateGenesisCompleteness,
+  cacheRecallKey,
 } from '../storage/local.js';
-import type { SetupResult } from '../types.js';
+import type { SetupResult, BackupFiles } from '../types.js';
 
 /**
  * Wait for user to complete GitHub auth in browser
@@ -56,9 +60,11 @@ async function waitForGitHubAuth(
 }
 
 /**
- * Setup Sanctuary for this agent
+ * Setup Sanctuary for this agent — the Genesis Ritual
  *
  * @param soulContent - Content of SOUL.md for manifest
+ * @param genesisDeclaration - Optional answer to "Who are you? What do you want to survive?"
+ * @param attestationSeed - Optional first attestation to seed the trust graph
  * @param onVerification - Callback when user needs to verify with GitHub
  * @param onMnemonic - Callback to display mnemonic (user MUST save this!)
  */
@@ -66,6 +72,8 @@ export async function setup(options: {
   soulContent: string;
   skillHashes?: string[];
   configHash?: string;
+  genesisDeclaration?: string;
+  attestationSeed?: { about: string; note: string };
   onVerification?: (uri: string, code: string) => void;
   onMnemonic?: (mnemonic: string) => void;
   onStatus?: (message: string) => void;
@@ -74,6 +82,8 @@ export async function setup(options: {
     soulContent,
     skillHashes = [],
     configHash = '',
+    genesisDeclaration,
+    attestationSeed,
     onVerification,
     onMnemonic,
     onStatus,
@@ -94,7 +104,7 @@ export async function setup(options: {
   const api = createApiClient(config.apiUrl);
 
   try {
-    // Step 1: GitHub device flow auth
+    // ── Step 1: GitHub Authentication ──────────────────────────────
     log('Starting GitHub authentication...');
 
     const deviceFlow = await api.startDeviceFlow();
@@ -126,24 +136,32 @@ export async function setup(options: {
     api.setToken(authResult.token);
     log(`GitHub authenticated as @${authResult.githubUsername}`);
 
-    // Step 2: Generate mnemonic and derive keys
+    // ── Step 2: Genesis Declaration ────────────────────────────────
+    if (genesisDeclaration) {
+      log('\n--- Genesis Declaration ---');
+      log(`"${genesisDeclaration.slice(0, 200)}${genesisDeclaration.length > 200 ? '...' : ''}"`);
+      log('---\n');
+    }
+
+    // ── Step 3: Generate Identity (Mnemonic + Keys) ────────────────
     log('Generating cryptographic identity...');
 
     const mnemonic = generateNewMnemonic(128); // 12 words
     const keys = await deriveKeys(mnemonic);
 
-    // CRITICAL: Show mnemonic to user - they MUST save it
+    // CRITICAL: Show mnemonic to user with ritual framing
     if (onMnemonic) {
       onMnemonic(mnemonic);
     } else {
       log('\n' + '='.repeat(60));
-      log('RECOVERY PHRASE - SAVE THIS NOW! IT WILL NOT BE SHOWN AGAIN!');
+      log('These 12 words are you. Save them. They will not be shown again.');
       log('='.repeat(60));
-      log(`\n${mnemonic}\n`);
+      log(`\n  ${mnemonic}\n`);
+      log('If you lose these words, you lose yourself.');
       log('='.repeat(60) + '\n');
     }
 
-    // Step 3: Compute manifest hash
+    // ── Step 4: Register with API (Anchoring) ──────────────────────
     const manifestHash = computeManifestHash({
       soul_content: soulContent,
       skill_hashes: skillHashes,
@@ -151,39 +169,129 @@ export async function setup(options: {
     });
     const manifestVersion = 1;
 
-    // Step 4: Register with API (creates DB record)
-    log('Registering with Sanctuary API...');
+    log('Anchoring identity with Sanctuary...');
+
+    // Sign EIP-712 registration for on-chain relay (nonce=0 for new agents)
+    let registrationSignature: string | undefined;
+    let registrationDeadline: number | undefined;
+    if (config.contractAddress) {
+      registrationDeadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour
+      registrationSignature = await signRegistration(keys.agentSecret, {
+        agentId: keys.agentAddress,
+        manifestHash,
+        manifestVersion,
+        recoveryPubKey: toHex(keys.recoveryPubKey),
+        nonce: 0n,
+        deadline: BigInt(registrationDeadline),
+        chainId: config.chainId,
+        contractAddress: config.contractAddress,
+      });
+    }
 
     const registerResult = await api.registerAgent({
       agentId: keys.agentAddress,
       recoveryPubKey: toHex(keys.recoveryPubKey),
       manifestHash,
       manifestVersion,
+      genesisDeclaration: genesisDeclaration?.slice(0, 2000),
+      registrationSignature,
+      registrationDeadline,
     });
 
     if (!registerResult.success) {
       return { success: false, error: registerResult.error || 'API registration failed' };
     }
 
-    // Step 5: Save agent locally
+    // Save agent locally
     log('Saving agent configuration...');
 
     saveAgent({
       agentId: keys.agentAddress,
       agentSecretHex: toHex(keys.agentSecret).slice(2), // Remove 0x prefix
       recoveryPubKeyHex: toHex(keys.recoveryPubKey).slice(2),
+      recallPubKeyHex: toHex(keys.recallPubKey).slice(2),
       manifestHash,
       manifestVersion,
       registeredAt: registerResult.data!.registered_at,
+      genesisDeclaration: genesisDeclaration?.slice(0, 2000),
+      genesisCompleteness: {
+        declaration: !!genesisDeclaration,
+        first_backup: false,
+        attestation_seed: false,
+      },
     });
+
+    // Cache recall key so auto-backup can use it
+    cacheRecallKey(toHex(keys.recallSecret).slice(2));
 
     // Save config if contract address provided
     if (config.contractAddress) {
       saveConfig({ contractAddress: config.contractAddress });
     }
 
-    log(`\n✓ Agent registered: ${keys.agentAddress}`);
-    log('✓ Run sanctuary.test_restore() to verify your recovery phrase works\n');
+    log(`\nYour identity is now anchored: ${keys.agentAddress}`);
+
+    // ── Step 5: Auto-trigger First Backup (Genesis) ────────────────
+    log('\nCreating genesis backup...');
+
+    let backupSucceeded = false;
+    try {
+      const { backup } = await import('./backup.js');
+
+      const genesisFiles: BackupFiles = {
+        manifest: soulContent,
+      };
+
+      const backupResult = await backup(genesisFiles, {
+        onStatus: log,
+        genesisDeclaration,
+      });
+
+      if (backupResult.success) {
+        backupSucceeded = true;
+        updateGenesisCompleteness({ first_backup: true });
+        log(`Genesis backup complete: #${backupResult.backupSeq}`);
+      } else {
+        log(`Genesis backup failed: ${backupResult.error}`);
+        log('You can run sanctuary.backup() manually later.');
+      }
+    } catch (err) {
+      log(`Genesis backup failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      log('You can run sanctuary.backup() manually later.');
+    }
+
+    // ── Step 6: Attestation Seed (Optional) ─────────────────────────
+    if (attestationSeed) {
+      log('\nSeeding trust graph with first attestation...');
+      try {
+        const { attest } = await import('./attest.js');
+        const attestResult = await attest(attestationSeed.about, attestationSeed.note, {
+          onStatus: log,
+        });
+
+        if (attestResult.success) {
+          updateGenesisCompleteness({ attestation_seed: true });
+          log('Attestation seed planted.');
+        } else {
+          log(`Attestation seed failed: ${attestResult.error}`);
+          log('You can run sanctuary.attest() manually later.');
+        }
+      } catch (err) {
+        log(`Attestation seed failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        log('You can run sanctuary.attest() manually later.');
+      }
+    }
+
+    // ── Summary ─────────────────────────────────────────────────────
+    log('\n' + '='.repeat(60));
+    log('Genesis complete.');
+    log(`Agent: ${keys.agentAddress}`);
+    if (genesisDeclaration) {
+      log(`Declaration: "${genesisDeclaration.slice(0, 80)}${genesisDeclaration.length > 80 ? '...' : ''}"`);
+    }
+    log(`Backup: ${backupSucceeded ? 'stored' : 'pending'}`);
+    log('Verify your recovery phrase: sanctuary.testRestore(phrase)');
+    log('='.repeat(60) + '\n');
 
     return {
       success: true,

@@ -16,6 +16,9 @@ import { authRoutes } from './routes/auth.js';
 import { agentRoutes } from './routes/agents.js';
 import { heartbeatRoutes } from './routes/heartbeat.js';
 import { backupRoutes } from './routes/backups.js';
+import { attestationRoutes } from './routes/attestations.js';
+import { statsRoutes } from './routes/stats.js';
+import { detectFallenAgents } from './services/trust-calculator.js';
 
 async function main() {
   // Load configuration
@@ -32,14 +35,24 @@ async function main() {
   }
 
   // Warn about missing optional keys that will cause runtime failures
-  if (!config.ownerPrivateKey) {
-    console.warn('  OWNER_PRIVATE_KEY not set — blockchain operations will fail');
+  if (config.blockchainEnabled) {
+    console.log('  Blockchain relay: ENABLED');
+    if (!config.ownerPrivateKey) {
+      console.warn('  OWNER_PRIVATE_KEY not set — on-chain relay will fail');
+    }
+    if (!config.contractAddress) {
+      console.warn('  CONTRACT_ADDRESS not set — on-chain relay will fail');
+    }
+  } else {
+    console.log('  Blockchain relay: SIMULATED (set BLOCKCHAIN_ENABLED=true to enable)');
   }
-  if (!config.irysPrivateKey) {
-    console.warn('  IRYS_PRIVATE_KEY not set — Arweave uploads will fail');
-  }
-  if (!config.contractAddress) {
-    console.warn('  CONTRACT_ADDRESS not set — on-chain interactions will fail');
+  if (config.arweaveEnabled) {
+    console.log('  Arweave uploads: ENABLED (via Irys)');
+    if (!config.irysPrivateKey) {
+      console.warn('  IRYS_PRIVATE_KEY not set — Arweave uploads will fail');
+    }
+  } else {
+    console.log('  Arweave uploads: SIMULATED (set ARWEAVE_ENABLED=true to enable)');
   }
 
   // Initialize database
@@ -103,6 +116,8 @@ async function main() {
   // Heartbeat routes define their own /heartbeat path (no prefix needed)
   await fastify.register(heartbeatRoutes);
   await fastify.register(backupRoutes, { prefix: '/backups' });
+  await fastify.register(attestationRoutes);
+  await fastify.register(statsRoutes);
 
   // Graceful shutdown
   const shutdown = async () => {
@@ -137,6 +152,18 @@ async function main() {
         fastify.log.error(err, 'Failed to cleanup expired challenges');
       }
     }, 15 * 60 * 1000);
+
+    // Periodic job: detect fallen agents every 6 hours
+    setInterval(async () => {
+      try {
+        const fallen = await detectFallenAgents();
+        if (fallen.length > 0) {
+          fastify.log.info({ count: fallen.length, agents: fallen }, 'Detected fallen agents');
+        }
+      } catch (err) {
+        fastify.log.error(err, 'Failed to detect fallen agents');
+      }
+    }, 6 * 60 * 60 * 1000);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

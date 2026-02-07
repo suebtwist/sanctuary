@@ -52,4 +52,17 @@ export function configureRateLimits(fastify: FastifyInstance): void {
       };
     }
   });
+
+  // Resurrection: 5 per IP per hour (brute-force prevention)
+  fastify.addHook('onRoute', (routeOptions) => {
+    if (routeOptions.url === '/agents/:agentId/resurrect' && routeOptions.method === 'POST') {
+      routeOptions.config = {
+        ...routeOptions.config,
+        rateLimit: {
+          max: 5,
+          timeWindow: '1 hour',
+        },
+      };
+    }
+  });
 }

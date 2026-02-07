@@ -16,10 +16,8 @@ import { deriveKeys, toHex, fromHex } from '../crypto/keys.js';
 import {
   decryptBackup,
   deserializeWrappedKey,
-  deserializeEncryptedFile,
   type EncryptedFile,
 } from '../crypto/encrypt.js';
-import { recoverAddress, keccak256 } from '../crypto/sign.js';
 import { createApiClient } from '../services/api.js';
 import {
   getConfig,
@@ -28,7 +26,9 @@ import {
   cacheRecallKey,
   clearRecallCache,
 } from '../storage/local.js';
-import type { RestoreResult, BackupFiles } from '../types.js';
+import type { RestoreResult, BackupFiles, SnapshotMeta } from '../types.js';
+import { WELL_KNOWN_FILES } from '../types.js';
+import { parseBackupData, verifyBackupSignature } from '../utils/backup-parser.js';
 
 // Arweave GraphQL endpoint
 const ARWEAVE_GRAPHQL = 'https://arweave.net/graphql';
@@ -106,93 +106,6 @@ async function downloadBackup(txId: string): Promise<Uint8Array> {
   return new Uint8Array(buffer);
 }
 
-/**
- * Parse backup data (reverse of backup serialization)
- */
-function parseBackupData(data: Uint8Array): {
-  header: any;
-  encryptedFiles: Map<string, EncryptedFile>;
-} {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const decoder = new TextDecoder();
-  let offset = 0;
-
-  // Read header length
-  const headerLen = view.getUint32(offset, true);
-  offset += 4;
-
-  // Read header
-  const headerBytes = data.slice(offset, offset + headerLen);
-  offset += headerLen;
-  const header = JSON.parse(decoder.decode(headerBytes));
-
-  // Read file count
-  const fileCount = view.getUint32(offset, true);
-  offset += 4;
-
-  // Read files
-  const encryptedFiles = new Map<string, EncryptedFile>();
-
-  for (let i = 0; i < fileCount; i++) {
-    // Read name length
-    const nameLen = view.getUint32(offset, true);
-    offset += 4;
-
-    // Read name
-    const nameBytes = data.slice(offset, offset + nameLen);
-    offset += nameLen;
-    const filename = decoder.decode(nameBytes);
-
-    // Read data length
-    const dataLen = view.getUint32(offset, true);
-    offset += 4;
-
-    // Read data
-    const fileData = data.slice(offset, offset + dataLen);
-    offset += dataLen;
-
-    encryptedFiles.set(filename, deserializeEncryptedFile(fileData));
-  }
-
-  return { header, encryptedFiles };
-}
-
-/**
- * Verify backup signature
- */
-function verifyBackupSignature(header: any, agentId: string): boolean {
-  try {
-    // Rebuild signature preimage
-    const filesCanonical = JSON.stringify(
-      Object.keys(header.files)
-        .sort()
-        .reduce((acc: any, key: string) => {
-          acc[key] = header.files[key];
-          return acc;
-        }, {})
-    );
-
-    const preimage = [
-      'sanctuary-backup-v1',
-      header.agent_id.toLowerCase(),
-      header.backup_id,
-      header.backup_seq.toString(),
-      header.timestamp.toString(),
-      header.manifest_hash.toLowerCase(),
-      (header.prev_backup_hash || '').toLowerCase(),
-      keccak256(filesCanonical),
-      keccak256(header.wrapped_keys.recovery),
-      keccak256(header.wrapped_keys.recall),
-    ].join('|');
-
-    const hash = keccak256(preimage);
-    const recovered = recoverAddress(hash, header.signature);
-
-    return recovered.toLowerCase() === agentId.toLowerCase();
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Restore agent from mnemonic phrase
@@ -205,9 +118,10 @@ export async function restore(
   options?: {
     useApi?: boolean;
     onStatus?: (message: string) => void;
+    file?: string;  // Selective recovery: decrypt only this file from latest backup
   }
-): Promise<RestoreResult & { files?: BackupFiles }> {
-  const { useApi = true, onStatus } = options || {};
+): Promise<RestoreResult & { files?: BackupFiles; snapshotMeta?: SnapshotMeta; selectedFileContent?: string }> {
+  const { useApi = true, onStatus, file: selectiveFile } = options || {};
   const log = onStatus || console.log;
 
   try {
@@ -224,18 +138,24 @@ export async function restore(
     let backups: ArweaveBackup[] = [];
 
     if (useApi) {
-      // Try API first
-      const config = getConfig();
-      const api = createApiClient(config.apiUrl);
-      const result = await api.listBackups(agentId, 100);
-
-      if (result.success && result.data) {
-        backups = result.data.backups.map(b => ({
-          txId: b.arweave_tx_id,
-          backupSeq: b.backup_seq,
-          manifestHash: b.manifest_hash,
-          timestamp: b.timestamp,
-        }));
+      // Try API first (requires authentication)
+      try {
+        const config = getConfig();
+        const api = createApiClient(config.apiUrl);
+        const authResult = await api.authenticateAgent(agentId, keys.agentSecret);
+        if (authResult.success) {
+          const result = await api.listBackups(agentId, 100);
+          if (result.success && result.data) {
+            backups = result.data.backups.map(b => ({
+              txId: b.arweave_tx_id,
+              backupSeq: b.backup_seq,
+              manifestHash: b.manifest_hash,
+              timestamp: b.timestamp,
+            }));
+          }
+        }
+      } catch {
+        // API auth/list failed — will fall back to Arweave
       }
     }
 
@@ -258,6 +178,7 @@ export async function restore(
         agentId,
         agentSecretHex: toHex(keys.agentSecret).slice(2),
         recoveryPubKeyHex: toHex(keys.recoveryPubKey).slice(2),
+        recallPubKeyHex: toHex(keys.recallPubKey).slice(2),
         manifestHash: '',
         manifestVersion: 1,
         registeredAt: 0,
@@ -295,6 +216,39 @@ export async function restore(
     // Step 5: Decrypt backup
     log('Decrypting backup...');
     const wrappedKey = deserializeWrappedKey(header.wrapped_keys.recovery);
+
+    // Selective file recovery: only decrypt the requested file
+    if (selectiveFile) {
+      log(`Selective recovery: extracting "${selectiveFile}"...`);
+      // The encrypted filename has .enc appended
+      const encFilename = selectiveFile + '.enc';
+      const encFile = encryptedFiles.get(encFilename);
+      if (!encFile) {
+        const available = [...encryptedFiles.keys()].map(k => k.replace(/\.enc$/, '')).join(', ');
+        return {
+          success: false,
+          error: `File "${selectiveFile}" not found in backup. Available: ${available}`,
+        };
+      }
+
+      // Decrypt just this one file using the same envelope
+      const dek = (await import('../crypto/encrypt.js')).unwrapKey(wrappedKey, keys.recoverySecret);
+      const { deriveFileKey, decryptFile, buildAad } = await import('../crypto/encrypt.js');
+      const fileKey = deriveFileKey(dek, selectiveFile);
+      const aad = buildAad(header.backup_id, header.timestamp, agentId, header.manifest_hash, selectiveFile);
+      const decrypted = decryptFile(encFile, fileKey, aad);
+
+      const text = new TextDecoder().decode(decrypted);
+      log(`✓ Recovered "${selectiveFile}" (${text.length} bytes)\n`);
+
+      return {
+        success: true,
+        agentId,
+        backupsFound: backups.length,
+        latestBackupSeq: latest.backupSeq,
+        selectedFileContent: text,
+      };
+    }
 
     const decryptedFiles = decryptBackup(
       encryptedFiles,
@@ -337,6 +291,21 @@ export async function restore(
       }
     }
 
+    // Check for soul.md in restored files
+    const soulContent = decryptedFiles.get(WELL_KNOWN_FILES.SOUL);
+    if (soulContent) {
+      const soulText = decoder.decode(soulContent);
+      log(`\n--- ${WELL_KNOWN_FILES.SOUL} ---`);
+      log(soulText.slice(0, 500) + (soulText.length > 500 ? '\n...(truncated)' : ''));
+      log('---\n');
+    }
+
+    // Display genesis declaration if present in snapshot_meta
+    const snapshotMeta: SnapshotMeta | undefined = header.snapshot_meta;
+    if (snapshotMeta?.genesis_declaration) {
+      log(`Your genesis declaration: "${snapshotMeta.genesis_declaration}"`);
+    }
+
     // Step 7: Save agent locally
     log('Restoring local state...');
 
@@ -347,6 +316,7 @@ export async function restore(
       agentId,
       agentSecretHex: toHex(keys.agentSecret).slice(2),
       recoveryPubKeyHex: toHex(keys.recoveryPubKey).slice(2),
+      recallPubKeyHex: toHex(keys.recallPubKey).slice(2),
       manifestHash: header.manifest_hash,
       manifestVersion: header.manifest_version,
       registeredAt: header.timestamp,
@@ -364,6 +334,7 @@ export async function restore(
       backupsFound: backups.length,
       latestBackupSeq: latest.backupSeq,
       files,
+      snapshotMeta,
     };
   } catch (error) {
     return {

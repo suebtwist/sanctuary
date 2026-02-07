@@ -98,6 +98,39 @@ export interface ProofResponse {
   verify_url: string;
 }
 
+export interface ResurrectionManifest {
+  identity: {
+    address: string;
+    github_username?: string;
+    trust_score: number;
+    trust_level: string;
+    attestation_count: number;
+    registered_at: number;
+    last_backup: number | null;
+    last_heartbeat: number | null;
+    total_snapshots: number;
+    resurrection_count: number;
+  };
+  snapshots: Array<{
+    backup_id: string;
+    backup_seq: number;
+    timestamp: number;
+    arweave_tx_id: string;
+    size_bytes: number;
+    manifest_hash: string;
+    snapshot_meta?: {
+      model?: string;
+      platform?: string;
+      genesis?: boolean;
+      genesis_declaration?: string;
+      session_number?: number;
+    };
+  }>;
+  genesis_declaration: string | null;
+  status: string;
+  previous_status: string;
+}
+
 /**
  * Sanctuary API Client
  */
@@ -263,6 +296,9 @@ export class SanctuaryApi {
     recoveryPubKey: string;
     manifestHash: string;
     manifestVersion: number;
+    genesisDeclaration?: string;
+    registrationSignature?: string;
+    registrationDeadline?: number;
   }): Promise<ApiResponse<{ agent_id: string; registered_at: number; status: string }>> {
     return this.request('POST', '/agents/register', {
       body: params,
@@ -292,6 +328,13 @@ export class SanctuaryApi {
    */
   async generateProof(agentId: string): Promise<ApiResponse<ProofResponse>> {
     return this.request<ProofResponse>('POST', `/agents/${encodeURIComponent(agentId)}/proof`);
+  }
+
+  /**
+   * Resurrect a fallen agent (requires auth)
+   */
+  async resurrectAgent(agentId: string): Promise<ApiResponse<ResurrectionManifest>> {
+    return this.request<ResurrectionManifest>('POST', `/agents/${encodeURIComponent(agentId)}/resurrect`);
   }
 
   // ============ Heartbeat ============
@@ -365,8 +408,29 @@ export class SanctuaryApi {
       manifest_hash: string;
     }>;
   }>> {
-    return this.request('GET', `/backups/${encodeURIComponent(agentId)}?limit=${limit}`, {
-      auth: false,
+    return this.request('GET', `/backups/${encodeURIComponent(agentId)}?limit=${limit}`);
+  }
+
+  // ============ Attestations ============
+
+  /**
+   * Relay a signed attestation meta-transaction via the API
+   */
+  async relayAttestation(params: {
+    from: string;
+    about: string;
+    noteHash: string;
+    deadline: number;
+    signature: string;
+    note?: string;
+  }): Promise<ApiResponse<{
+    status: string;
+    from: string;
+    about: string;
+    note_hash: string;
+  }>> {
+    return this.request('POST', '/attestations/relay', {
+      body: params,
     });
   }
 
@@ -382,9 +446,7 @@ export class SanctuaryApi {
     size_bytes: number;
     manifest_hash: string;
   }>> {
-    return this.request('GET', `/backups/${encodeURIComponent(agentId)}/latest`, {
-      auth: false,
-    });
+    return this.request('GET', `/backups/${encodeURIComponent(agentId)}/latest`);
   }
 }
 

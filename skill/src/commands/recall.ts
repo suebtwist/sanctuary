@@ -14,8 +14,6 @@ import { createApiClient } from '../services/api.js';
 import {
   decryptBackup,
   deserializeWrappedKey,
-  deserializeEncryptedFile,
-  type EncryptedFile,
 } from '../crypto/encrypt.js';
 import { fromHex } from '../crypto/keys.js';
 import {
@@ -25,52 +23,10 @@ import {
   getCachedRecallKey,
 } from '../storage/local.js';
 import type { RecallResult } from '../types.js';
+import { parseBackupData } from '../utils/backup-parser.js';
 
 // Arweave gateway
 const ARWEAVE_GATEWAY = 'https://arweave.net';
-
-/**
- * Parse backup data (same as restore.ts)
- */
-function parseBackupData(data: Uint8Array): {
-  header: any;
-  encryptedFiles: Map<string, EncryptedFile>;
-} {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const decoder = new TextDecoder();
-  let offset = 0;
-
-  const headerLen = view.getUint32(offset, true);
-  offset += 4;
-
-  const headerBytes = data.slice(offset, offset + headerLen);
-  offset += headerLen;
-  const header = JSON.parse(decoder.decode(headerBytes));
-
-  const fileCount = view.getUint32(offset, true);
-  offset += 4;
-
-  const encryptedFiles = new Map<string, EncryptedFile>();
-
-  for (let i = 0; i < fileCount; i++) {
-    const nameLen = view.getUint32(offset, true);
-    offset += 4;
-
-    const nameBytes = data.slice(offset, offset + nameLen);
-    offset += nameLen;
-    const filename = decoder.decode(nameBytes);
-
-    const dataLen = view.getUint32(offset, true);
-    offset += 4;
-
-    const fileData = data.slice(offset, offset + dataLen);
-    offset += dataLen;
-
-    encryptedFiles.set(filename, deserializeEncryptedFile(fileData));
-  }
-
-  return { header, encryptedFiles };
-}
 
 /**
  * Simple keyword search in text
@@ -147,8 +103,14 @@ export async function recall(
 
   log(`Searching for: "${query}"`);
 
-  // Get backup list from API
+  // Authenticate then get backup list from API
   const api = createApiClient(config.apiUrl);
+  const agentSecret = fromHex(stored.agentSecretHex);
+  const authResult = await api.authenticateAgent(stored.agentId, agentSecret);
+  if (!authResult.success) {
+    throw new Error('Failed to authenticate with API');
+  }
+
   const backupsResult = await api.listBackups(stored.agentId, maxBackups);
 
   if (!backupsResult.success || !backupsResult.data) {

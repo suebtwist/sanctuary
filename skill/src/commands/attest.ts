@@ -63,10 +63,7 @@ export async function attest(
 
     // Connect to chain
     log('Connecting to Base...');
-    const provider = new ethers.JsonRpcProvider(config.apiUrl.includes('localhost')
-      ? 'https://sepolia.base.org'
-      : 'https://mainnet.base.org'
-    );
+    const provider = new ethers.JsonRpcProvider(config.baseRpcUrl);
 
     const contract = new ethers.Contract(config.contractAddress, SANCTUARY_ABI, provider);
 
@@ -103,13 +100,9 @@ export async function attest(
       contractAddress: config.contractAddress,
     });
 
-    // Submit via meta-transaction
-    // In a real implementation, we'd call the API to submit this
-    // For now, we'll need a relayer or direct tx
+    // Submit via API relay
+    log('Submitting attestation via relay...');
 
-    log('Submitting attestation...');
-
-    // Store note via API
     const api = createApiClient(config.apiUrl);
     const authResult = await api.authenticateAgent(stored.agentId, agentSecret);
 
@@ -117,17 +110,25 @@ export async function attest(
       return { success: false, error: 'Authentication failed' };
     }
 
-    // TODO: API endpoint to submit attestation and relay to chain
-    // For now, return the signature for manual submission
+    const relayResult = await api.relayAttestation({
+      from: stored.agentId,
+      about,
+      noteHash,
+      deadline: Number(deadline),
+      signature,
+      note,
+    });
 
-    log(`\n✓ Attestation signed for ${about}`);
+    if (!relayResult.success) {
+      return { success: false, error: relayResult.error || 'Attestation relay failed' };
+    }
+
+    log(`\n✓ Attestation submitted for ${about}`);
     log(`  Note hash: ${noteHash}`);
-    log(`  Signature: ${signature.slice(0, 20)}...`);
-    log('\n  (Submit via contract or wait for relayer support)\n');
+    log(`  Status: ${relayResult.data?.status || 'pending'}`);
 
     return {
       success: true,
-      txHash: signature, // Not a real tx hash, just the signature for now
     };
   } catch (error) {
     return {

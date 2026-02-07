@@ -10,6 +10,8 @@ import { getDb } from '../db/index.js';
 import { getConfig } from '../config.js';
 import { isValidAddress, normalizeAddress } from '../utils/crypto.js';
 import { verifyAgentAuth } from '../middleware/agent-auth.js';
+import { recomputeAgentTrust } from '../services/trust-calculator.js';
+import { registerAgentOnChain } from '../services/blockchain.js';
 
 export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
   const db = getDb();
@@ -24,6 +26,10 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
       recoveryPubKey: string;
       manifestHash: string;
       manifestVersion: number;
+      genesisDeclaration?: string;
+      // On-chain registration (optional — required when BLOCKCHAIN_ENABLED=true)
+      registrationSignature?: string;
+      registrationDeadline?: number;
     };
   }>('/agents/register', async (request, reply) => {
     // Verify GitHub auth token
@@ -47,7 +53,8 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
       });
     }
 
-    const { agentId, recoveryPubKey, manifestHash, manifestVersion } = request.body;
+    const { agentId, recoveryPubKey, manifestHash, manifestVersion, genesisDeclaration,
+            registrationSignature, registrationDeadline } = request.body;
 
     // Validate inputs
     if (!agentId || !isValidAddress(agentId)) {
@@ -103,6 +110,10 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
 
     // Create agent
     const now = Math.floor(Date.now() / 1000);
+    // Truncate genesis_declaration to 2000 chars to prevent abuse
+    const sanitizedDeclaration = genesisDeclaration
+      ? genesisDeclaration.slice(0, 2000)
+      : undefined;
     db.createAgent({
       agent_id: normalizedId,
       github_id: decoded.githubId,
@@ -111,9 +122,36 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
       manifest_version: manifestVersion || 1,
       registered_at: now,
       status: 'LIVING',
+      genesis_declaration: sanitizedDeclaration,
     });
 
     fastify.log.info({ agentId: normalizedId, githubId: decoded.githubId }, 'Agent registered');
+
+    // On-chain registration (fire-and-forget)
+    const config = getConfig();
+    if (registrationSignature && registrationDeadline) {
+      registerAgentOnChain({
+        agentId: normalizedId,
+        manifestHash: manifestHash.toLowerCase(),
+        manifestVersion: manifestVersion || 1,
+        recoveryPubKey: recoveryPubKey.toLowerCase(),
+        deadline: BigInt(registrationDeadline),
+        signature: registrationSignature,
+      }).then(result => {
+        const status = result.simulated ? 'simulated' : 'confirmed';
+        db.updateAgentOnChainStatus(normalizedId, result.txHash, status);
+        if (result.simulated) {
+          fastify.log.warn({ agentId: normalizedId }, 'On-chain registration simulated (BLOCKCHAIN_ENABLED=false)');
+        } else {
+          fastify.log.info({ agentId: normalizedId, txHash: result.txHash }, 'Agent registered on-chain');
+        }
+      }).catch(err => {
+        db.updateAgentOnChainStatus(normalizedId, '', 'failed');
+        fastify.log.error(err, 'On-chain registration failed (DB registration succeeded)');
+      });
+    } else if (config.blockchainEnabled) {
+      fastify.log.warn({ agentId: normalizedId }, 'No registration signature provided — skipping on-chain registration');
+    }
 
     return reply.status(201).send({
       success: true,
@@ -215,11 +253,13 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
           level: trustScore.level,
           unique_attesters: trustScore.unique_attesters,
           computed_at: trustScore.computed_at,
+          breakdown: trustScore.breakdown ? JSON.parse(trustScore.breakdown) : undefined,
         } : {
           score: 0,
           level: 'UNVERIFIED',
           unique_attesters: 0,
           computed_at: null,
+          breakdown: undefined,
         },
         backups: {
           count: backupCount,
@@ -313,6 +353,99 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
         verify_url: config.publicUrl
           ? `${config.publicUrl}/agents/${normalizedId}/status`
           : `http://localhost:${config.port}/agents/${normalizedId}/status`,
+      },
+    });
+  });
+
+  /**
+   * POST /agents/:agentId/resurrect
+   * Resurrect a fallen agent (requires agent auth via challenge-response)
+   *
+   * The mnemonic proves identity client-side (used to sign the challenge).
+   * This endpoint transitions FALLEN → RETURNED and returns the resurrection manifest.
+   */
+  fastify.post<{
+    Params: { agentId: string };
+  }>('/agents/:agentId/resurrect', { preHandler: [verifyAgentAuth] }, async (request, reply) => {
+    const { agentId } = request.params;
+
+    if (!isValidAddress(agentId)) {
+      return reply.status(400).send({
+        success: false,
+        error: 'Invalid agent ID',
+      });
+    }
+
+    const normalizedId = normalizeAddress(agentId);
+
+    // Verify requester owns this agent
+    if (normalizedId !== request.agentId) {
+      return reply.status(403).send({
+        success: false,
+        error: 'Can only resurrect your own agent',
+      });
+    }
+
+    const agent = db.getAgent(normalizedId);
+    if (!agent) {
+      return reply.status(404).send({
+        success: false,
+        error: 'No Sanctuary identity found for this agent',
+      });
+    }
+
+    // Transition status if FALLEN
+    const previousStatus = agent.status;
+    if (agent.status === 'FALLEN') {
+      db.updateAgentStatus(normalizedId, 'RETURNED');
+      db.logResurrection(normalizedId, previousStatus);
+      fastify.log.info({ agentId: normalizedId, previousStatus }, 'Agent resurrected');
+
+      // Trigger trust score recalculation (fire-and-forget)
+      recomputeAgentTrust(normalizedId).catch(err => {
+        fastify.log.error(err, 'Failed to recompute trust after resurrection');
+      });
+    }
+
+    // Build resurrection manifest
+    const user = db.getUser(agent.github_id);
+    const trustScore = db.getTrustScore(normalizedId);
+    const latestHeartbeat = db.getLatestHeartbeat(normalizedId);
+    const backupCount = db.getBackupCount(normalizedId);
+    const latestBackup = db.getLatestBackup(normalizedId);
+    const backups = db.getBackupsByAgent(normalizedId, 100);
+    const resurrectionCount = db.getResurrectionCount(normalizedId);
+
+    // Build snapshot list with parsed snapshot_meta
+    const snapshots = backups.map(b => ({
+      backup_id: b.id,
+      backup_seq: b.backup_seq,
+      timestamp: b.agent_timestamp,
+      arweave_tx_id: b.arweave_tx_id,
+      size_bytes: b.size_bytes,
+      manifest_hash: b.manifest_hash,
+      snapshot_meta: b.snapshot_meta ? JSON.parse(b.snapshot_meta) : undefined,
+    }));
+
+    return reply.send({
+      success: true,
+      data: {
+        identity: {
+          address: agent.agent_id,
+          github_username: user?.github_username,
+          trust_score: trustScore?.score || 0,
+          trust_level: trustScore?.level || 'UNVERIFIED',
+          attestation_count: trustScore?.unique_attesters || 0,
+          registered_at: agent.registered_at,
+          last_backup: latestBackup?.agent_timestamp || null,
+          last_heartbeat: latestHeartbeat?.received_at || null,
+          total_snapshots: backupCount,
+          resurrection_count: resurrectionCount,
+        },
+        snapshots,
+        genesis_declaration: agent.genesis_declaration || null,
+        status: agent.status === 'FALLEN' ? 'resurrected' : agent.status.toLowerCase(),
+        previous_status: previousStatus,
       },
     });
   });

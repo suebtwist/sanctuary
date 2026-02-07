@@ -12,6 +12,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   encryptBackup,
   serializeWrappedKey,
@@ -27,7 +29,8 @@ import {
   getCachedRecallKey,
   cacheRecallKey,
 } from '../storage/local.js';
-import type { BackupResult, BackupFiles } from '../types.js';
+import type { BackupResult, BackupFiles, SnapshotMeta } from '../types.js';
+import { WELL_KNOWN_FILES } from '../types.js';
 
 /**
  * Create a backup and upload to Sanctuary
@@ -40,9 +43,13 @@ export async function backup(
   options?: {
     recallSecretHex?: string;
     onStatus?: (message: string) => void;
+    model?: string;
+    genesisDeclaration?: string;
+    soulPath?: string;
+    sessionNumber?: number;
   }
 ): Promise<BackupResult> {
-  const { recallSecretHex, onStatus } = options || {};
+  const { recallSecretHex, onStatus, model, genesisDeclaration, soulPath, sessionNumber } = options || {};
   const log = onStatus || console.log;
 
   if (!hasAgent()) {
@@ -116,12 +123,30 @@ export async function backup(
       fileMap.set('user.json', encoder.encode(files.user));
     }
 
+    // Include soul.md: explicit path, or auto-detect from cwd
+    const resolvedSoulPath = soulPath
+      ? resolve(soulPath)
+      : resolve(WELL_KNOWN_FILES.SOUL);
+    if (existsSync(resolvedSoulPath)) {
+      const soulContent = readFileSync(resolvedSoulPath, 'utf-8');
+      fileMap.set(WELL_KNOWN_FILES.SOUL, encoder.encode(soulContent));
+      log(`Including ${WELL_KNOWN_FILES.SOUL}`);
+    }
+
+    // Include memory.md if it exists in cwd
+    const memoryMdPath = resolve(WELL_KNOWN_FILES.MEMORY);
+    if (existsSync(memoryMdPath)) {
+      const memoryMdContent = readFileSync(memoryMdPath, 'utf-8');
+      fileMap.set(WELL_KNOWN_FILES.MEMORY, encoder.encode(memoryMdContent));
+      log(`Including ${WELL_KNOWN_FILES.MEMORY}`);
+    }
+
     // Encrypt backup
     log('Encrypting backup...');
     const backupId = randomUUID();
     const timestamp = Math.floor(Date.now() / 1000);
     const recoveryPubKey = fromHex(stored.recoveryPubKeyHex);
-    const recallPubKey = fromHex(stored.recoveryPubKeyHex); // TODO: separate recall pubkey
+    const recallPubKey = fromHex(stored.recallPubKeyHex);
 
     const encrypted = encryptBackup(
       fileMap,
@@ -143,6 +168,24 @@ export async function backup(
       };
     }
 
+    // Build snapshot_meta
+    const isGenesis = !(latestResult.success && latestResult.data);
+    const snapshotMeta: SnapshotMeta = {
+      platform: config.platform || 'openclaw',
+    };
+    if (model || config.model) {
+      snapshotMeta.model = model || config.model;
+    }
+    if (isGenesis) {
+      snapshotMeta.genesis = true;
+      if (genesisDeclaration) {
+        snapshotMeta.genesis_declaration = genesisDeclaration;
+      }
+    }
+    if (sessionNumber !== undefined) {
+      snapshotMeta.session_number = sessionNumber;
+    }
+
     // Build header
     const header = {
       version: '1.0',
@@ -159,9 +202,10 @@ export async function backup(
         recall: serializeWrappedKey(encrypted.wrappedKeyRecall),
       },
       signature: '',
+      snapshot_meta: snapshotMeta,
     };
 
-    // Sign header
+    // Sign header (snapshot_meta is not part of the signature preimage — backward compatible)
     log('Signing backup...');
     header.signature = await signBackupHeader(agentSecret, header);
 
