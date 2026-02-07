@@ -39,11 +39,11 @@ async function getUploader() {
       throw new Error('IRYS_PRIVATE_KEY not configured');
     }
     let builder = Uploader(Ethereum)
-      .withRpc(config.baseRpcUrl)
+      .withRpc(config.irysRpcUrl)
       .withWallet(config.irysPrivateKey)
       .bundlerUrl(config.irysNode);
     // Use devnet for non-mainnet chains (Base Sepolia = 84532)
-    if (config.chainId !== BASE_MAINNET_CHAIN_ID) {
+    if (config.irysChainId !== BASE_MAINNET_CHAIN_ID) {
       builder = builder.devnet();
     }
     uploaderInstance = await builder;

@@ -187,7 +187,7 @@ export class SanctuaryApi {
       const response = await fetch(url, {
         method,
         headers,
-        body: options.body ? JSON.stringify(options.body) : undefined,
+        body: method === 'GET' ? undefined : JSON.stringify(options.body || {}),
         signal: controller.signal,
       });
 

@@ -26,7 +26,7 @@ import type { RecallResult } from '../types.js';
 import { parseBackupData } from '../utils/backup-parser.js';
 
 // Arweave gateway
-const ARWEAVE_GATEWAY = 'https://arweave.net';
+const ARWEAVE_GATEWAY = 'https://gateway.irys.xyz';
 
 /**
  * Simple keyword search in text

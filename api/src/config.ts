@@ -45,6 +45,8 @@ export interface Config {
   githubMinAgeDays: number;
   backupSizeLimit: number;
   irysMinBalanceWei: bigint;
+  irysChainId: number;
+  irysRpcUrl: string;
 }
 
 function requireEnv(name: string): string {
@@ -111,7 +113,9 @@ export function loadConfig(): Config {
     challengeTtlSeconds: optionalEnvInt('CHALLENGE_TTL_SECONDS', 300), // 5 minutes
     githubMinAgeDays: optionalEnvInt('GITHUB_MIN_AGE_DAYS', 30),
     backupSizeLimit: optionalEnvInt('BACKUP_SIZE_LIMIT', 1 * 1024 * 1024), // 1MB
-    irysMinBalanceWei: BigInt(optionalEnv('IRYS_MIN_BALANCE_WEI', '1000000000000000')), // 0.001 ETH
+    irysMinBalanceWei: BigInt(optionalEnv('IRYS_MIN_BALANCE_WEI', '0')),
+    irysChainId: parseInt(optionalEnv('IRYS_CHAIN_ID', '8453'), 10),
+    irysRpcUrl: optionalEnv('IRYS_RPC_URL', 'https://mainnet.base.org'), // 0.001 ETH
   };
 }
 

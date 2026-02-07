@@ -97,6 +97,11 @@ async function main() {
   // Apply per-route rate limits (heartbeat 10/min, registration 3/hr, backup 1/day)
   configureRateLimits(fastify);
 
+  // Binary content type parser for backup uploads
+  fastify.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (req, body, done) => {
+    done(null, body);
+  });
+
   // Health check
   fastify.get('/health', async () => ({
     status: 'ok',

@@ -22,7 +22,7 @@ export function generateNonce(): string {
  * Format: "sanctuary-auth|{nonce}|{agentId}|{timestamp}"
  */
 export function buildAuthMessage(nonce: string, agentId: string, timestamp: number): string {
-  return `sanctuary-auth|${nonce}|${agentId}|${timestamp}`;
+  return `sanctuary-auth|${nonce}|${agentId.toLowerCase()}|${timestamp}`;
 }
 
 /**

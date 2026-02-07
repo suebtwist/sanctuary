@@ -127,7 +127,7 @@ export async function signAuthChallenge(
   agentId: string,
   timestamp: number
 ): Promise<string> {
-  const message = `sanctuary-auth|${nonce}|${agentId}|${timestamp}`;
+  const message = `sanctuary-auth|${nonce}|${agentId.toLowerCase()}|${timestamp}`;
   return signMessage(agentSecret, message);
 }
 
