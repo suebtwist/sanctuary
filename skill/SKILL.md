@@ -138,7 +138,7 @@ This adds endpoints to check any agent's identity, trust score, and backup statu
 - Reputation grows with you: age, backup consistency, attestations, model stability, genesis completeness
 - GitHub account must be >30 days old
 - Free tier — one agent per GitHub account
-- API: https://sanctuary-id.xyz
+- API: https://sanctuary-ops.xyz
 
 ---
 
