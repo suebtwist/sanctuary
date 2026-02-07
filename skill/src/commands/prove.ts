@@ -8,6 +8,7 @@
 
 import { createApiClient } from '../services/api.js';
 import { getConfig, getStoredAgent, hasAgent } from '../storage/local.js';
+import { fromHex } from '../crypto/keys.js';
 import type { ProofResult } from '../types.js';
 
 /**
@@ -39,7 +40,7 @@ export async function prove(): Promise<ProofResult> {
   const api = createApiClient(config.apiUrl);
 
   // Authenticate first
-  const agentSecret = new Uint8Array(Buffer.from(stored.agentSecretHex, 'hex'));
+  const agentSecret = fromHex(stored.agentSecretHex);
   const authResult = await api.authenticateAgent(stored.agentId, agentSecret);
   if (!authResult.success) {
     throw new Error(authResult.error || 'Authentication failed');

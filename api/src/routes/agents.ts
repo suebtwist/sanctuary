@@ -13,6 +13,15 @@ import { verifyAgentAuth } from '../middleware/agent-auth.js';
 import { recomputeAgentTrust } from '../services/trust-calculator.js';
 import { registerAgentOnChain } from '../services/blockchain.js';
 
+/** Safe JSON.parse that returns undefined on malformed input */
+function safeJsonParse(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
   const db = getDb();
 
@@ -76,6 +85,13 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
       return reply.status(400).send({
         success: false,
         error: 'Invalid manifest hash',
+      });
+    }
+
+    if (manifestVersion !== undefined && (manifestVersion < 0 || manifestVersion > 65535 || !Number.isInteger(manifestVersion))) {
+      return reply.status(400).send({
+        success: false,
+        error: 'Invalid manifest version (must be integer 0–65535)',
       });
     }
 
@@ -264,7 +280,7 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
           level: trustScore.level,
           unique_attesters: trustScore.unique_attesters,
           computed_at: trustScore.computed_at,
-          breakdown: trustScore.breakdown ? JSON.parse(trustScore.breakdown) : undefined,
+          breakdown: trustScore.breakdown ? safeJsonParse(trustScore.breakdown) : undefined,
         } : {
           score: 0,
           level: 'UNVERIFIED',
@@ -435,7 +451,7 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
       arweave_tx_id: b.arweave_tx_id,
       size_bytes: b.size_bytes,
       manifest_hash: b.manifest_hash,
-      snapshot_meta: b.snapshot_meta ? JSON.parse(b.snapshot_meta) : undefined,
+      snapshot_meta: b.snapshot_meta ? safeJsonParse(b.snapshot_meta) : undefined,
     }));
 
     return reply.send({

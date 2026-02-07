@@ -498,6 +498,13 @@ CREATE INDEX IF NOT EXISTS idx_resurrection_log_agent ON resurrection_log(agent_
     return stmt.all(limit) as DbAttestation[];
   }
 
+  hasRecentAttestation(fromAgent: string, aboutAgent: string, sinceTimestamp: number): boolean {
+    const stmt = this.db.prepare(
+      'SELECT 1 FROM attestations WHERE from_agent = ? AND about_agent = ? AND created_at > ? LIMIT 1'
+    );
+    return stmt.get(fromAgent, aboutAgent, sinceTimestamp) !== undefined;
+  }
+
   getAttestationCount(aboutAgentId: string): number {
     const stmt = this.db.prepare(
       'SELECT COUNT(DISTINCT from_agent) as count FROM attestations WHERE about_agent = ?'

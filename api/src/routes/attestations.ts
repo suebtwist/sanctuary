@@ -77,7 +77,7 @@ export async function attestationRoutes(fastify: FastifyInstance): Promise<void>
         });
       }
 
-      if (!deadline || deadline < Math.floor(Date.now() / 1000)) {
+      if (typeof deadline !== 'number' || !Number.isFinite(deadline) || deadline < Math.floor(Date.now() / 1000)) {
         return reply.status(400).send({
           success: false,
           error: 'Invalid or expired deadline',
@@ -98,12 +98,8 @@ export async function attestationRoutes(fastify: FastifyInstance): Promise<void>
 
       // Check for duplicate attestation (cooldown: 7 days matching contract)
       const ATTESTATION_COOLDOWN_SECONDS = 7 * 24 * 60 * 60;
-      const existingAttestations = db.getAttestationsAbout(normalizedAbout, 1000);
-      const recentFromSameAgent = existingAttestations.find(
-        a => a.from_agent.toLowerCase() === normalizedFrom.toLowerCase() &&
-             a.created_at > Math.floor(Date.now() / 1000) - ATTESTATION_COOLDOWN_SECONDS
-      );
-      if (recentFromSameAgent) {
+      const cooldownCutoff = Math.floor(Date.now() / 1000) - ATTESTATION_COOLDOWN_SECONDS;
+      if (db.hasRecentAttestation(normalizedFrom, normalizedAbout, cooldownCutoff)) {
         return reply.status(429).send({
           success: false,
           error: 'Attestation cooldown active (7 days between attestations to the same agent)',

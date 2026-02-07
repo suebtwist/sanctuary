@@ -81,8 +81,8 @@ export const sanctuary = {
     return backup(files, options);
   },
 
-  pin: (note: string) => {
-    const { pin } = require('./commands/backup.js');
+  pin: async (note: string) => {
+    const { pin } = await import('./commands/backup.js');
     return pin(note);
   },
 
@@ -94,8 +94,8 @@ export const sanctuary = {
     return restore(mnemonic, options);
   },
 
-  lock: () => {
-    const { lock } = require('./commands/restore.js');
+  lock: async () => {
+    const { lock } = await import('./commands/restore.js');
     return lock();
   },
 
@@ -160,18 +160,18 @@ export const sanctuary = {
   },
 
   // Utilities
-  isInitialized: () => {
-    const { isInitialized } = require('./storage/local.js');
+  isInitialized: async () => {
+    const { isInitialized } = await import('./storage/local.js');
     return isInitialized();
   },
 
-  getConfig: () => {
-    const { getConfig } = require('./storage/local.js');
+  getConfig: async () => {
+    const { getConfig } = await import('./storage/local.js');
     return getConfig();
   },
 
-  saveConfig: (config: Partial<import('./types.js').SkillConfig>) => {
-    const { saveConfig } = require('./storage/local.js');
+  saveConfig: async (config: Partial<import('./types.js').SkillConfig>) => {
+    const { saveConfig } = await import('./storage/local.js');
     return saveConfig(config);
   },
 };

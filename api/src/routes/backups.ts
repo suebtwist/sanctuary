@@ -13,6 +13,15 @@ import { recomputeAgentTrust } from '../services/trust-calculator.js';
 import { uploadToArweave, checkIrysBalance } from '../services/irys.js';
 import { v4 as uuidv4 } from 'uuid';
 
+/** Safe JSON.parse that returns undefined on malformed input */
+function safeJsonParse(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Validate that a parsed backup header has all required fields with correct types.
  * Returns null if valid, or a descriptive error string if invalid.
@@ -27,8 +36,8 @@ function validateBackupHeader(header: any): string | null {
   if (typeof header.backup_id !== 'string' || !header.backup_id) {
     return 'Missing or invalid field: backup_id (string)';
   }
-  if (typeof header.backup_seq !== 'number') {
-    return 'Missing or invalid field: backup_seq (number)';
+  if (typeof header.backup_seq !== 'number' || !Number.isInteger(header.backup_seq) || header.backup_seq < 0) {
+    return 'Missing or invalid field: backup_seq (non-negative integer)';
   }
   if (typeof header.timestamp !== 'number') {
     return 'Missing or invalid field: timestamp (number)';
@@ -44,6 +53,9 @@ function validateBackupHeader(header: any): string | null {
   }
   if (typeof header.wrapped_keys.recovery !== 'string' || typeof header.wrapped_keys.recall !== 'string') {
     return 'wrapped_keys must contain recovery and recall strings';
+  }
+  if (header.prev_backup_hash !== undefined && typeof header.prev_backup_hash !== 'string') {
+    return 'Invalid field: prev_backup_hash (must be string if present)';
   }
   if (typeof header.signature !== 'string' || !header.signature) {
     return 'Missing or invalid field: signature (string)';
@@ -181,6 +193,14 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
         }
 
         snapshotMetaJson = JSON.stringify(meta);
+
+        // Cap snapshot_meta size to prevent DB bloat (10KB)
+        if (snapshotMetaJson.length > 10240) {
+          return reply.status(400).send({
+            success: false,
+            error: 'snapshot_meta exceeds 10KB limit',
+          });
+        }
       }
 
       // Check Irys balance before uploading (only when Arweave is enabled)
@@ -203,16 +223,13 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
         }
       }
 
-      // Get next backup sequence number
-      const backupSeq = db.getNextBackupSeq(agentId);
-
       // Upload to Arweave via Irys (or simulate if ARWEAVE_ENABLED=false)
       let arweaveTxId: string;
       try {
         const agentTimestamp = backupHeader.timestamp || Math.floor(Date.now() / 1000);
         const uploadResult = await uploadToArweave(body, {
           agentId,
-          backupSeq,
+          backupSeq: backupHeader.backup_seq,
           manifestHash: backupHeader.manifest_hash || '',
           sizeBytes: body.length,
           agentTimestamp,
@@ -287,7 +304,7 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
     { preHandler: verifyAgentAuth },
     async (request, reply) => {
     const { agentId } = request.params;
-    const limit = request.query.limit || 30;
+    const limit = Number(request.query.limit) || 30;
 
     if (!isValidAddress(agentId)) {
       return reply.status(400).send({
@@ -321,7 +338,7 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
           received_at: b.received_at,
           size_bytes: b.size_bytes,
           manifest_hash: b.manifest_hash,
-          snapshot_meta: b.snapshot_meta ? JSON.parse(b.snapshot_meta) : undefined,
+          snapshot_meta: b.snapshot_meta ? safeJsonParse(b.snapshot_meta) : undefined,
         })),
       },
     });
@@ -375,7 +392,7 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
         received_at: backup.received_at,
         size_bytes: backup.size_bytes,
         manifest_hash: backup.manifest_hash,
-        snapshot_meta: backup.snapshot_meta ? JSON.parse(backup.snapshot_meta) : undefined,
+        snapshot_meta: backup.snapshot_meta ? safeJsonParse(backup.snapshot_meta) : undefined,
       },
     });
   });

@@ -373,15 +373,28 @@ export class SanctuaryApi {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers,
         body: backupData,
+        signal: controller.signal,
       });
 
-      return response.json() as Promise<ApiResponse<BackupUploadResponse>>;
+      clearTimeout(timeoutId);
+
+      const data = await response.json();
+      return data as ApiResponse<BackupUploadResponse>;
     } catch (error) {
+      clearTimeout(timeoutId);
+
+      if (error instanceof Error && error.name === 'AbortError') {
+        return { success: false, error: 'Upload timeout' };
+      }
+
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',

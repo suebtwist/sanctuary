@@ -24,39 +24,63 @@ export function parseBackupData(data: Uint8Array): {
 } {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const decoder = new TextDecoder();
+  const totalLen = data.byteLength;
   let offset = 0;
 
+  function assertBounds(needed: number, label: string): void {
+    if (offset + needed > totalLen) {
+      throw new Error(`Backup corrupted: ${label} requires ${needed} bytes at offset ${offset}, but only ${totalLen - offset} remain`);
+    }
+  }
+
   // Read header length
+  assertBounds(4, 'header length');
   const headerLen = view.getUint32(offset, true);
   offset += 4;
 
   // Read header
+  assertBounds(headerLen, 'header data');
   const headerBytes = data.slice(offset, offset + headerLen);
   offset += headerLen;
-  const header = JSON.parse(decoder.decode(headerBytes));
+
+  let header: any;
+  try {
+    header = JSON.parse(decoder.decode(headerBytes));
+  } catch {
+    throw new Error('Backup corrupted: header is not valid JSON');
+  }
 
   // Read file count
+  assertBounds(4, 'file count');
   const fileCount = view.getUint32(offset, true);
   offset += 4;
+
+  if (fileCount > 10000) {
+    throw new Error(`Backup corrupted: unreasonable file count (${fileCount})`);
+  }
 
   // Read files
   const encryptedFiles = new Map<string, EncryptedFile>();
 
   for (let i = 0; i < fileCount; i++) {
     // Read name length
+    assertBounds(4, `file[${i}] name length`);
     const nameLen = view.getUint32(offset, true);
     offset += 4;
 
     // Read name
+    assertBounds(nameLen, `file[${i}] name`);
     const nameBytes = data.slice(offset, offset + nameLen);
     offset += nameLen;
     const filename = decoder.decode(nameBytes);
 
     // Read data length
+    assertBounds(4, `file[${i}] data length`);
     const dataLen = view.getUint32(offset, true);
     offset += 4;
 
     // Read data
+    assertBounds(dataLen, `file[${i}] data`);
     const fileData = data.slice(offset, offset + dataLen);
     offset += dataLen;
 
