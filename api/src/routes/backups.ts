@@ -68,7 +68,7 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
    * Header: X-Backup-Header (base64 encoded JSON)
    */
   fastify.post(
-    '/backups/upload',
+    '/upload',
     {
       preHandler: verifyAgentAuth,
       config: {
@@ -232,24 +232,28 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
         });
       }
 
-      // Record backup in database
+      // Record backup in database (atomic seq assignment + insert)
       const backupId = uuidv4();
       const receivedAt = Math.floor(Date.now() / 1000);
 
-      db.createBackup({
-        id: backupId,
-        agent_id: agentId,
-        arweave_tx_id: arweaveTxId,
-        backup_seq: backupSeq,
-        agent_timestamp: backupHeader.timestamp || receivedAt,
-        received_at: receivedAt,
-        size_bytes: body.length,
-        manifest_hash: backupHeader.manifest_hash || '',
-        snapshot_meta: snapshotMetaJson,
+      const backupRecord = db.transaction(() => {
+        const atomicSeq = db.getNextBackupSeq(agentId);
+        db.createBackup({
+          id: backupId,
+          agent_id: agentId,
+          arweave_tx_id: arweaveTxId,
+          backup_seq: atomicSeq,
+          agent_timestamp: backupHeader.timestamp || receivedAt,
+          received_at: receivedAt,
+          size_bytes: body.length,
+          manifest_hash: backupHeader.manifest_hash || '',
+          snapshot_meta: snapshotMetaJson,
+        });
+        return { backupSeq: atomicSeq };
       });
 
       fastify.log.info(
-        { agentId, backupId, backupSeq, sizeBytes: body.length },
+        { agentId, backupId, backupSeq: backupRecord.backupSeq, sizeBytes: body.length },
         'Backup uploaded'
       );
 
@@ -262,7 +266,7 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
         success: true,
         data: {
           backup_id: backupId,
-          backup_seq: backupSeq,
+          backup_seq: backupRecord.backupSeq,
           arweave_tx_id: arweaveTxId,
           size_bytes: body.length,
           received_at: receivedAt,
@@ -279,7 +283,7 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
     Params: { agentId: string };
     Querystring: { limit?: number };
   }>(
-    '/backups/:agentId',
+    '/:agentId',
     { preHandler: verifyAgentAuth },
     async (request, reply) => {
     const { agentId } = request.params;
@@ -330,7 +334,7 @@ export async function backupRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get<{
     Params: { agentId: string };
   }>(
-    '/backups/:agentId/latest',
+    '/:agentId/latest',
     { preHandler: verifyAgentAuth },
     async (request, reply) => {
     const { agentId } = request.params;

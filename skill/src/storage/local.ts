@@ -121,7 +121,7 @@ export function getConfig(): SanctuaryConfig {
   const stored = readJson<Partial<SanctuaryConfig>>(CONFIG_FILE);
   const chainId = stored?.chainId || 84532; // Base Sepolia
   return {
-    apiUrl: stored?.apiUrl || process.env.SANCTUARY_API_URL || 'http://localhost:3000',
+    apiUrl: stored?.apiUrl || process.env.SANCTUARY_API_URL || 'https://api.sanctuary-ops.xyz',
     chainId,
     contractAddress: stored?.contractAddress || '',
     baseRpcUrl: stored?.baseRpcUrl || process.env.BASE_RPC_URL ||

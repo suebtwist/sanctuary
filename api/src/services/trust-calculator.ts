@@ -445,7 +445,7 @@ export async function computeAllTrustScores(options?: {
   let attestations: Attestation[] = options?.attestations || [];
   if (!options?.attestations && options?.useChain && config.contractAddress) {
     try {
-      attestations = await fetchAttestations(config.contractAddress, config.baseRpcUrl);
+      attestations = await fetchAttestations(config.contractAddress, config.baseRpcUrl, config.contractDeployBlock);
     } catch (error) {
       console.error('Failed to fetch attestations from chain:', error);
     }
@@ -493,28 +493,22 @@ export async function recomputeAgentTrust(
 
   const weights = options?.weights ?? DEFAULT_WEIGHTS;
 
-  // When no attestations provided, preserve existing DB attestation data
-  // instead of zeroing the signal (which has 30% weight).
+  // Get attestation data — either from caller or from DB
   let attestation: { rawScore: number; uniqueAttesters: number };
   if (options?.attestations) {
     const attestationScores = computeAttestationScores([agentId], options.attestations);
     attestation = attestationScores.get(agentId) || { rawScore: 0, uniqueAttesters: 0 };
   } else {
-    const existing = db.getTrustScore(agentId);
-    if (existing && existing.breakdown) {
-      try {
-        const bd = JSON.parse(existing.breakdown) as TrustBreakdown;
-        // Reverse-engineer raw attestation score from normalized value
-        attestation = {
-          rawScore: bd.attestations * 10, // normalized = rawScore / 10
-          uniqueAttesters: existing.unique_attesters,
-        };
-      } catch {
-        attestation = { rawScore: 0, uniqueAttesters: 0 };
-      }
-    } else {
-      attestation = { rawScore: 0, uniqueAttesters: 0 };
-    }
+    // Query all DB attestations for accurate PageRank scoring
+    const allDbAttestations = db.getAllAttestations();
+    const mapped: Attestation[] = allDbAttestations.map(a => ({
+      from: a.from_agent,
+      about: a.about_agent,
+      timestamp: a.created_at,
+    }));
+    const allAgentIds = db.getAllAgents().map(a => a.agent_id);
+    const attestationScores = computeAttestationScores(allAgentIds, mapped);
+    attestation = attestationScores.get(agentId) || { rawScore: 0, uniqueAttesters: 0 };
   }
 
   const backups = db.getBackupsByAgent(agentId, 1000);

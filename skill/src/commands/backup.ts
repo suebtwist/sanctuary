@@ -164,7 +164,7 @@ export async function backup(
       const serialized = serializeEncryptedFile(encFile);
       filesMetadata[filename] = {
         size: serialized.length,
-        content_hash: 'sha256:' + keccak256Bytes(serialized).slice(2),
+        content_hash: 'keccak256:' + keccak256Bytes(serialized).slice(2),
       };
     }
 

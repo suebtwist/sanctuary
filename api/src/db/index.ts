@@ -23,6 +23,7 @@ export interface DbAgent {
   registered_at: number;
   status: string;
   genesis_declaration?: string;
+  recall_pub_key?: string;
   onchain_tx_hash?: string;
   onchain_status?: string; // 'pending' | 'confirmed' | 'failed' | 'simulated'
 }
@@ -225,6 +226,11 @@ CREATE INDEX IF NOT EXISTS idx_resurrection_log_agent ON resurrection_log(agent_
     if (!trustCols.some(c => c.name === 'breakdown')) {
       this.db.exec('ALTER TABLE trust_scores ADD COLUMN breakdown TEXT');
     }
+
+    // Add recall_pub_key column to agents table
+    if (!agentCols.some(c => c.name === 'recall_pub_key')) {
+      this.db.exec('ALTER TABLE agents ADD COLUMN recall_pub_key TEXT');
+    }
   }
 
   /**
@@ -258,12 +264,13 @@ CREATE INDEX IF NOT EXISTS idx_resurrection_log_agent ON resurrection_log(agent_
 
   createAgent(agent: DbAgent): void {
     const stmt = this.db.prepare(`
-      INSERT INTO agents (agent_id, github_id, recovery_pubkey, manifest_hash, manifest_version, registered_at, status, genesis_declaration)
-      VALUES (@agent_id, @github_id, @recovery_pubkey, @manifest_hash, @manifest_version, @registered_at, @status, @genesis_declaration)
+      INSERT INTO agents (agent_id, github_id, recovery_pubkey, manifest_hash, manifest_version, registered_at, status, genesis_declaration, recall_pub_key)
+      VALUES (@agent_id, @github_id, @recovery_pubkey, @manifest_hash, @manifest_version, @registered_at, @status, @genesis_declaration, @recall_pub_key)
     `);
     stmt.run({
       ...agent,
       genesis_declaration: agent.genesis_declaration ?? null,
+      recall_pub_key: agent.recall_pub_key ?? null,
     });
   }
 
@@ -321,6 +328,19 @@ CREATE INDEX IF NOT EXISTS idx_resurrection_log_agent ON resurrection_log(agent_
       SELECT * FROM heartbeats WHERE agent_id = ? ORDER BY received_at DESC LIMIT 1
     `);
     return stmt.get(agentId) as DbHeartbeat | undefined;
+  }
+
+  pruneHeartbeats(keepDays: number = 7): number {
+    const cutoff = Math.floor(Date.now() / 1000) - keepDays * 24 * 60 * 60;
+    const stmt = this.db.prepare(`
+      DELETE FROM heartbeats
+      WHERE received_at < ?
+      AND id NOT IN (
+        SELECT MAX(id) FROM heartbeats GROUP BY agent_id
+      )
+    `);
+    const result = stmt.run(cutoff);
+    return result.changes;
   }
 
   getAgentsWithoutRecentHeartbeat(thresholdSeconds: number): DbAgent[] {
@@ -457,11 +477,25 @@ CREATE INDEX IF NOT EXISTS idx_resurrection_log_agent ON resurrection_log(agent_
     stmt.run(att);
   }
 
+  updateAttestationTxHash(from: string, about: string, noteHash: string, txHash: string, simulated: number): void {
+    const stmt = this.db.prepare(
+      'UPDATE attestations SET tx_hash = ?, simulated = ? WHERE from_agent = ? AND about_agent = ? AND note_hash = ? AND tx_hash = ?'
+    );
+    stmt.run(txHash, simulated, from, about, noteHash, 'pending');
+  }
+
   getAttestationsAbout(agentId: string, limit = 100): DbAttestation[] {
     const stmt = this.db.prepare(
       'SELECT * FROM attestations WHERE about_agent = ? ORDER BY created_at DESC LIMIT ?'
     );
     return stmt.all(agentId, limit) as DbAttestation[];
+  }
+
+  getAllAttestations(limit = 10000): DbAttestation[] {
+    const stmt = this.db.prepare(
+      'SELECT * FROM attestations ORDER BY created_at DESC LIMIT ?'
+    );
+    return stmt.all(limit) as DbAttestation[];
   }
 
   getAttestationCount(aboutAgentId: string): number {

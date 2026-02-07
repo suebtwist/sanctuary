@@ -34,7 +34,7 @@ export async function attestationRoutes(fastify: FastifyInstance): Promise<void>
       note?: string;
     };
   }>(
-    '/attestations/relay',
+    '/relay',
     { preHandler: verifyAgentAuth },
     async (request, reply) => {
       const { from, about, noteHash, deadline, signature, note } = request.body;
@@ -52,6 +52,14 @@ export async function attestationRoutes(fastify: FastifyInstance): Promise<void>
         return reply.status(400).send({
           success: false,
           error: 'Invalid target agent address',
+        });
+      }
+
+      // Block self-attestation (mirrors contract require(from != about))
+      if (normalizeAddress(from) === normalizeAddress(about)) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Cannot attest to yourself',
         });
       }
 
@@ -88,6 +96,31 @@ export async function attestationRoutes(fastify: FastifyInstance): Promise<void>
       const normalizedFrom = normalizeAddress(from);
       const normalizedAbout = normalizeAddress(about);
 
+      // Check for duplicate attestation (cooldown: 7 days matching contract)
+      const ATTESTATION_COOLDOWN_SECONDS = 7 * 24 * 60 * 60;
+      const existingAttestations = db.getAttestationsAbout(normalizedAbout, 1000);
+      const recentFromSameAgent = existingAttestations.find(
+        a => a.from_agent.toLowerCase() === normalizedFrom.toLowerCase() &&
+             a.created_at > Math.floor(Date.now() / 1000) - ATTESTATION_COOLDOWN_SECONDS
+      );
+      if (recentFromSameAgent) {
+        return reply.status(429).send({
+          success: false,
+          error: 'Attestation cooldown active (7 days between attestations to the same agent)',
+        });
+      }
+
+      // Store attestation record immediately (before chain relay)
+      const now = Math.floor(Date.now() / 1000);
+      db.createAttestation({
+        from_agent: normalizedFrom,
+        about_agent: normalizedAbout,
+        note_hash: noteHash,
+        tx_hash: 'pending',
+        simulated: 0,
+        created_at: now,
+      });
+
       // Fire-and-forget relay to chain (don't block HTTP response)
       attestOnChain({
         from: normalizedFrom,
@@ -102,21 +135,15 @@ export async function attestationRoutes(fastify: FastifyInstance): Promise<void>
           fastify.log.info({ from: agentId, about, txHash: result.txHash }, 'Attestation relayed on-chain');
         }
 
-        // Store attestation record in DB
-        db.createAttestation({
-          from_agent: agentId,
-          about_agent: normalizedAbout,
-          note_hash: noteHash,
-          tx_hash: result.txHash,
-          simulated: result.simulated ? 1 : 0,
-          created_at: Math.floor(Date.now() / 1000),
-        });
+        // Update with real tx_hash
+        db.updateAttestationTxHash(normalizedFrom, normalizedAbout, noteHash, result.txHash, result.simulated ? 1 : 0);
 
         // Recompute trust for the attested agent
         recomputeAgentTrust(normalizedAbout).catch(err => {
           fastify.log.error(err, 'Failed to recompute trust after attestation');
         });
       }).catch(err => {
+        db.updateAttestationTxHash(normalizedFrom, normalizedAbout, noteHash, 'failed', 0);
         fastify.log.error(err, 'Attestation relay failed');
       });
 

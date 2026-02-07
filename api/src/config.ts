@@ -30,11 +30,15 @@ export interface Config {
   contractAddress: string;
   ownerPrivateKey: string;
   chainId: number;
+  contractDeployBlock: number;
 
   // Arweave
   arweaveEnabled: boolean;
   irysPrivateKey: string;
   irysNode: string;
+
+  // Proof signing
+  proofSigningKey: string;
 
   // Limits
   challengeTtlSeconds: number;
@@ -93,11 +97,15 @@ export function loadConfig(): Config {
     contractAddress: optionalEnv('CONTRACT_ADDRESS', ''),
     ownerPrivateKey: optionalEnv('OWNER_PRIVATE_KEY', ''),
     chainId: optionalEnvInt('CHAIN_ID', 84532), // 84532 = Base Sepolia, 8453 = Base mainnet
+    contractDeployBlock: optionalEnvInt('CONTRACT_DEPLOY_BLOCK', 0),
 
     // Arweave
     arweaveEnabled: optionalEnv('ARWEAVE_ENABLED', 'false') === 'true',
     irysPrivateKey: optionalEnv('IRYS_PRIVATE_KEY', ''),
     irysNode: optionalEnv('IRYS_NODE', 'https://node2.irys.xyz'),
+
+    // Proof signing (falls back to JWT_SECRET if not set)
+    proofSigningKey: optionalEnv('PROOF_SIGNING_KEY', requireEnv('JWT_SECRET')),
 
     // Limits
     challengeTtlSeconds: optionalEnvInt('CHALLENGE_TTL_SECONDS', 300), // 5 minutes
@@ -128,6 +136,9 @@ export function validateConfig(config: Config): string[] {
     }
     if (config.blockchainEnabled && !config.contractAddress) {
       errors.push('CONTRACT_ADDRESS is required when BLOCKCHAIN_ENABLED=true');
+    }
+    if (config.proofSigningKey === config.jwtSecret) {
+      console.warn('  WARNING: PROOF_SIGNING_KEY should be different from JWT_SECRET in production');
     }
   }
 

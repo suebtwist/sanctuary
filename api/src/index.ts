@@ -116,8 +116,8 @@ async function main() {
   // Heartbeat routes define their own /heartbeat path (no prefix needed)
   await fastify.register(heartbeatRoutes);
   await fastify.register(backupRoutes, { prefix: '/backups' });
-  await fastify.register(attestationRoutes);
-  await fastify.register(statsRoutes);
+  await fastify.register(attestationRoutes, { prefix: '/attestations' });
+  await fastify.register(statsRoutes, { prefix: '/stats' });
 
   // Graceful shutdown
   const shutdown = async () => {
@@ -152,6 +152,19 @@ async function main() {
         fastify.log.error(err, 'Failed to cleanup expired challenges');
       }
     }, 15 * 60 * 1000);
+
+    // Periodic cleanup: prune old heartbeats every hour
+    setInterval(() => {
+      try {
+        const db = getDb();
+        const pruned = db.pruneHeartbeats(7);
+        if (pruned > 0) {
+          fastify.log.info({ pruned }, 'Pruned old heartbeats');
+        }
+      } catch (err) {
+        fastify.log.error(err, 'Failed to prune heartbeats');
+      }
+    }, 60 * 60 * 1000);
 
     // Periodic job: detect fallen agents every 6 hours
     setInterval(async () => {

@@ -53,6 +53,19 @@ export function configureRateLimits(fastify: FastifyInstance): void {
     }
   });
 
+  // Auth challenge: 10 per minute per IP (prevents DB row spam)
+  fastify.addHook('onRoute', (routeOptions) => {
+    if (routeOptions.url === '/auth/challenge' && routeOptions.method === 'GET') {
+      routeOptions.config = {
+        ...routeOptions.config,
+        rateLimit: {
+          max: 10,
+          timeWindow: '1 minute',
+        },
+      };
+    }
+  });
+
   // Resurrection: 5 per IP per hour (brute-force prevention)
   fastify.addHook('onRoute', (routeOptions) => {
     if (routeOptions.url === '/agents/:agentId/resurrect' && routeOptions.method === 'POST') {

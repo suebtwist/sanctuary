@@ -39,7 +39,7 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
    * POST /auth/github/device
    * Start GitHub device flow authentication
    */
-  fastify.post('/auth/github/device', async (_request, reply) => {
+  fastify.post('/github/device', async (_request, reply) => {
     try {
       const flow = await startDeviceFlow();
 
@@ -80,7 +80,7 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
    */
   fastify.post<{
     Body: { device_code: string };
-  }>('/auth/github/poll', async (request, reply) => {
+  }>('/github/poll', async (request, reply) => {
     const { device_code } = request.body;
 
     const flow = activeDeviceFlows.get(device_code);
@@ -167,7 +167,7 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
    */
   fastify.get<{
     Querystring: { agentId: string };
-  }>('/auth/challenge', async (request, reply) => {
+  }>('/challenge', async (request, reply) => {
     const { agentId } = request.query;
 
     if (!agentId || !isValidAddress(agentId)) {
@@ -220,7 +220,7 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
       timestamp: number;
       signature: string;
     };
-  }>('/auth/agent', async (request, reply) => {
+  }>('/agent', async (request, reply) => {
     const { agentId, nonce, timestamp, signature } = request.body;
 
     // Validate inputs
@@ -311,7 +311,7 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
    * GET /auth/me
    * Get current session info
    */
-  fastify.get('/auth/me', async (request, reply) => {
+  fastify.get('/me', async (request, reply) => {
     try {
       const decoded = await request.jwtVerify<{
         type: 'agent' | 'github';

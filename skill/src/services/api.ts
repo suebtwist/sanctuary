@@ -455,6 +455,6 @@ export class SanctuaryApi {
  */
 export function createApiClient(baseUrl?: string): SanctuaryApi {
   return new SanctuaryApi({
-    baseUrl: baseUrl || process.env.SANCTUARY_API_URL || 'http://localhost:3000',
+    baseUrl: baseUrl || process.env.SANCTUARY_API_URL || 'https://api.sanctuary-ops.xyz',
   });
 }

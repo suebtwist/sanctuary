@@ -29,7 +29,7 @@ export async function statsRoutes(fastify: FastifyInstance): Promise<void> {
    * GET /stats
    * Public aggregate statistics — no auth required.
    */
-  fastify.get('/stats', async (_request, reply) => {
+  fastify.get('/', async (_request, reply) => {
     const now = Date.now();
 
     if (cache && now < cache.expiresAt) {

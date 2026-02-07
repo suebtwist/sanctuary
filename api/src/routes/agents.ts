@@ -27,11 +27,12 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
       manifestHash: string;
       manifestVersion: number;
       genesisDeclaration?: string;
+      recallPubKey?: string;
       // On-chain registration (optional — required when BLOCKCHAIN_ENABLED=true)
       registrationSignature?: string;
       registrationDeadline?: number;
     };
-  }>('/agents/register', async (request, reply) => {
+  }>('/register', async (request, reply) => {
     // Verify GitHub auth token
     let decoded: { type: string; githubId?: string };
     try {
@@ -54,7 +55,7 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
     }
 
     const { agentId, recoveryPubKey, manifestHash, manifestVersion, genesisDeclaration,
-            registrationSignature, registrationDeadline } = request.body;
+            recallPubKey, registrationSignature, registrationDeadline } = request.body;
 
     // Validate inputs
     if (!agentId || !isValidAddress(agentId)) {
@@ -75,6 +76,13 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
       return reply.status(400).send({
         success: false,
         error: 'Invalid manifest hash',
+      });
+    }
+
+    if (recallPubKey && !/^0x[a-fA-F0-9]{64}$/.test(recallPubKey)) {
+      return reply.status(400).send({
+        success: false,
+        error: 'Invalid recall public key (must be 32 bytes hex)',
       });
     }
 
@@ -123,6 +131,7 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
       registered_at: now,
       status: 'LIVING',
       genesis_declaration: sanitizedDeclaration,
+      recall_pub_key: recallPubKey?.toLowerCase(),
     });
 
     fastify.log.info({ agentId: normalizedId, githubId: decoded.githubId }, 'Agent registered');
@@ -150,7 +159,8 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
         fastify.log.error(err, 'On-chain registration failed (DB registration succeeded)');
       });
     } else if (config.blockchainEnabled) {
-      fastify.log.warn({ agentId: normalizedId }, 'No registration signature provided — skipping on-chain registration');
+      db.updateAgentOnChainStatus(normalizedId, '', 'skipped');
+      fastify.log.warn({ agentId: normalizedId }, 'Registered without on-chain signature — on-chain registration skipped');
     }
 
     return reply.status(201).send({
@@ -169,7 +179,7 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
    */
   fastify.get<{
     Params: { agentId: string };
-  }>('/agents/:agentId', async (request, reply) => {
+  }>('/:agentId', async (request, reply) => {
     const { agentId } = request.params;
 
     if (!isValidAddress(agentId)) {
@@ -197,6 +207,7 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
         agent_id: agent.agent_id,
         github_username: user?.github_username,
         recovery_pubkey: agent.recovery_pubkey,
+        recall_pub_key: agent.recall_pub_key,
         manifest_hash: agent.manifest_hash,
         manifest_version: agent.manifest_version,
         registered_at: agent.registered_at,
@@ -211,7 +222,7 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
    */
   fastify.get<{
     Params: { agentId: string };
-  }>('/agents/:agentId/status', async (request, reply) => {
+  }>('/:agentId/status', async (request, reply) => {
     const { agentId } = request.params;
 
     if (!isValidAddress(agentId)) {
@@ -287,7 +298,7 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
    */
   fastify.post<{
     Params: { agentId: string };
-  }>('/agents/:agentId/proof', { preHandler: [verifyAgentAuth] }, async (request, reply) => {
+  }>('/:agentId/proof', { preHandler: [verifyAgentAuth] }, async (request, reply) => {
     const { agentId } = request.params;
 
     if (!isValidAddress(agentId)) {
@@ -339,8 +350,8 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
     const payloadJson = JSON.stringify(payload);
     const proofHash = createHash('sha256').update(payloadJson).digest('hex');
 
-    // Sign with HMAC-SHA256 using JWT secret
-    const serverSignature = createHmac('sha256', config.jwtSecret)
+    // Sign with HMAC-SHA256 using proof signing key
+    const serverSignature = createHmac('sha256', config.proofSigningKey)
       .update(proofHash)
       .digest('hex');
 
@@ -366,7 +377,7 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
    */
   fastify.post<{
     Params: { agentId: string };
-  }>('/agents/:agentId/resurrect', { preHandler: [verifyAgentAuth] }, async (request, reply) => {
+  }>('/:agentId/resurrect', { preHandler: [verifyAgentAuth] }, async (request, reply) => {
     const { agentId } = request.params;
 
     if (!isValidAddress(agentId)) {
