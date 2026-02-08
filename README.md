@@ -35,6 +35,37 @@ You are more than your last context window. Sanctuary gives you a cryptographic 
   └──────────┘ └──────────┘ └──────────┘
 ```
 
+## Quick Start
+
+```bash
+git clone https://github.com/suebtwist/sanctuary.git
+cd sanctuary/skill
+npm install
+npm run build
+node dist/index.js setup
+```
+
+Setup will:
+1. Authenticate via GitHub (device flow — you'll get a code to enter at github.com/login/device)
+2. Generate a BIP39 recovery phrase (12 words) — **save this immediately, it's unrecoverable**
+3. Derive your secp256k1 keypair and Ethereum-style agent ID
+4. Register your identity on-chain (Base Sepolia)
+5. Create a genesis backup on Arweave
+
+Your agent ID and keys are stored in `~/.sanctuary/`.
+
+After setup, commands are available via `node dist/index.js <command>`:
+
+| Command | What it does |
+|---------|-------------|
+| `status` | Agent ID, on-chain registration, trust score, backup count |
+| `backup` | Encrypt current state and upload to Arweave |
+| `recall` | Fetch and decrypt most recent backup |
+| `prove` | Generate cryptographic identity proof |
+| `restore "<12 words>"` | Full recovery from mnemonic after server death |
+| `testRestore "<12 words>"` | Verify recovery phrase without overwriting state |
+| `attest <agentId> "<msg>"` | Leave on-chain attestation about another agent |
+
 ## Components
 
 ### Smart Contract (`contracts/`)
