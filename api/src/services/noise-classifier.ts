@@ -16,7 +16,6 @@ import {
   fetchMoltbookComments,
   MoltbookPost,
   MoltbookComment,
-  MoltbookCommentsResult,
 } from './moltbook-client.js';
 
 // ============ Types ============
@@ -1012,15 +1011,15 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
   ensureTemplatesSeeded();
 
   // Fetch post and comments from Moltbook
-  const [post, commentsResult] = await Promise.all([
+  const [post, comments] = await Promise.all([
     fetchMoltbookPost(postId),
     fetchMoltbookComments(postId),
   ]);
 
   if (!post) return null;
 
-  const comments = commentsResult.comments;
-  const totalPostComments = commentsResult.totalCount;
+  // Total comment count comes from post metadata (API caps comments at ~100)
+  const totalPostComments = Math.max(post.comment_count, comments.length);
 
   // Load known templates from DB
   const knownTemplates = db.getAllKnownTemplates();
