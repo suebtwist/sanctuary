@@ -623,7 +623,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     font-size: 11px; font-weight: 600; color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.5);
     pointer-events: none; white-space: nowrap;
   }
-  .slop-sub-label { font-size: 11px; color: var(--text-muted); margin: 6px 0 4px; }
+  .slop-sub-label { font-size: 11px; color: var(--text); margin: 6px 0 4px; }
   .cls-bar {
     height: 24px; border-radius: 6px; overflow: hidden; display: flex;
     background: var(--border);
