@@ -110,7 +110,7 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     // Get classification breakdown from classified_comments table
     const summary = db.getClassifiedCommentsSummary();
     const friendlyNames: Record<string, string> = {
-      spam_template: 'template',
+      spam_template: 'generic',
       spam_duplicate: 'duplicate',
       self_promo: 'promo',
     };
@@ -158,70 +158,50 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
-   * GET /noise/benchmark
+   * GET /noise/charts
    *
-   * Signal rate vs post age benchmark. Cached for 5 minutes.
+   * Data for aggregate charts: age-bucketed classification + spam concentration.
    */
-  fastify.get('/benchmark', async (_request, reply) => {
+  fastify.get('/charts', async (_request, reply) => {
     reply.header('Cache-Control', 'no-cache');
 
     const db = getDb();
-    const rows = db.getAllScanStats();
 
-    if (rows.length < 5) {
-      return reply.send({ total_posts_scanned: rows.length, insufficient_data: true });
-    }
-
-    const nowMs = Date.now();
-    // Every single day, like a stock chart
-    const BUCKETS: Array<{ label: string; min: number; max: number }> = [
-      { label: '<1h', min: 0,  max: 1 },
-      { label: '6h',  min: 1,  max: 6 },
-      { label: '1d',  min: 6,  max: 24 },
-    ];
-    for (let d = 2; d <= 30; d++) {
-      BUCKETS.push({ label: `${d}d`, min: (d - 1) * 24, max: d * 24 });
-    }
-    BUCKETS.push({ label: '30d+', min: 720, max: Infinity });
-
-    const bucketData: Map<string, { rates: number[]; comments: number[] }> = new Map();
-    for (const b of BUCKETS) bucketData.set(b.label, { rates: [], comments: [] });
-
-    let overallSum = 0;
-    for (const row of rows) {
-      const createdMs = new Date(row.post_created_at).getTime();
-      if (isNaN(createdMs)) continue;
-      const ageHours = (nowMs - createdMs) / 3_600_000;
-      for (const b of BUCKETS) {
-        if (ageHours >= b.min && ageHours < b.max) {
-          const bd = bucketData.get(b.label)!;
-          bd.rates.push(row.signal_rate);
-          bd.comments.push(row.comments_analyzed);
-          break;
+    // Age-bucketed classification counts
+    const rawBuckets = db.getAgeBucketedClassifications();
+    const BUCKET_ORDER = ['< 1d', '2-3d', '4-7d', '8-10d', '11-14d'];
+    const ageBuckets: Array<{ label: string; counts: Record<string, number>; total: number }> = [];
+    for (const label of BUCKET_ORDER) {
+      const counts: Record<string, number> = {};
+      let total = 0;
+      for (const row of rawBuckets) {
+        if (row.bucket === label) {
+          counts[row.classification] = row.count;
+          total += row.count;
         }
       }
-      overallSum += row.signal_rate;
+      ageBuckets.push({ label, counts, total });
     }
 
-    const buckets = [];
-    for (const b of BUCKETS) {
-      const bd = bucketData.get(b.label)!;
-      if (bd.rates.length < 2) continue;
-      buckets.push({
-        label: b.label,
-        min_age_hours: b.min,
-        max_age_hours: b.max === Infinity ? null : b.max,
-        avg_signal_rate: Math.round((bd.rates.reduce((a, c) => a + c, 0) / bd.rates.length) * 100) / 100,
-        post_count: bd.rates.length,
-        avg_comments: Math.round(bd.comments.reduce((a, c) => a + c, 0) / bd.comments.length),
-      });
-    }
+    // Spam concentration
+    const concentration = db.getSpamConcentration();
 
     return reply.send({
-      total_posts_scanned: rows.length,
-      generated_at: new Date().toISOString(),
-      overall_avg_signal_rate: Math.round((overallSum / rows.length) * 100) / 100,
-      buckets,
+      success: true,
+      data: {
+        age_buckets: ageBuckets,
+        spam_concentration: {
+          total_authors: concentration.totalAuthors,
+          total_posts: concentration.totalPosts,
+          total_comments: concentration.totalComments,
+          heavy_spammers: concentration.heavySpammers,
+          heavy_spammer_comments: concentration.heavySpammerComments,
+          heavy_spammer_pct: concentration.totalComments > 0
+            ? Math.round((concentration.heavySpammerComments / concentration.totalComments) * 1000) / 10
+            : 0,
+        },
+        classifier_version: CLASSIFIER_VERSION,
+      },
     });
   });
 
@@ -321,7 +301,7 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
 
     // Map internal classification names to friendly names for display
     const friendlyNames: Record<string, string> = {
-      spam_template: 'template',
+      spam_template: 'generic',
       spam_duplicate: 'duplicate',
       self_promo: 'promo',
     };
@@ -674,28 +654,47 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; color: var(--text-muted); font-size: 14px;
   }
-  .benchmark-section { display: none; margin-bottom: 20px; }
-  .benchmark-toggle {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 10px 0; cursor: pointer; color: var(--text-muted); font-size: 13px;
-    border-bottom: 1px solid var(--border); user-select: none;
+  .charts-section { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--border); }
+  .chart-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; margin-bottom: 20px;
   }
-  .benchmark-toggle:hover { color: var(--text); }
-  .benchmark-chevron { transition: transform 0.2s; font-size: 11px; }
-  .benchmark-chevron.open { transform: rotate(90deg); }
-  .benchmark-body {
-    max-height: 0; overflow: hidden; transition: max-height 0.3s ease;
+  .chart-card h3 { font-size: 16px; margin-bottom: 4px; }
+  .chart-subtitle { font-size: 12px; color: var(--text-muted); margin-bottom: 20px; }
+  .stacked-bar-container {
+    display: flex; align-items: flex-end; gap: 8px; height: 220px;
+    padding-bottom: 28px; position: relative;
   }
-  .benchmark-body.open { max-height: 400px; }
-  .benchmark-inner { padding: 16px 0 8px; }
-  .benchmark-chart { width: 100%; height: 190px; }
-  .benchmark-context {
-    font-size: 12px; color: var(--text-muted); margin-top: 10px; line-height: 1.5;
+  .bar-column { flex: 1; display: flex; flex-direction: column; align-items: center; position: relative; height: 100%; }
+  .bar-stack {
+    width: 100%; max-width: 80px; display: flex; flex-direction: column-reverse;
+    border-radius: 4px 4px 0 0; overflow: hidden; position: absolute; bottom: 28px;
   }
-  .benchmark-stats { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  .bar-seg { min-height: 1px; transition: height 0.5s ease; }
+  .bar-label { position: absolute; bottom: 8px; font-size: 11px; color: var(--text-muted); text-align: center; width: 100%; }
+  .bar-total { position: absolute; bottom: 0; font-size: 10px; color: var(--text-muted); text-align: center; width: 100%; opacity: 0.6; }
+  .chart-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; }
+  .chart-legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-muted); }
+  .chart-legend-dot { width: 10px; height: 10px; border-radius: 2px; }
+  .concentration-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 28px; margin-bottom: 20px;
+  }
+  .concentration-header { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 20px; font-weight: 600; }
+  .concentration-row { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; }
+  .concentration-num { font-size: 48px; font-weight: 700; line-height: 1; min-width: 80px; text-align: right; }
+  .concentration-label { font-size: 14px; color: var(--text-muted); line-height: 1.3; }
+  .concentration-footer { font-size: 11px; color: var(--text-muted); margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .stats-btn {
+    display: inline-block; margin-top: 10px; padding: 8px 18px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-muted); font-size: 13px;
+    cursor: pointer; text-decoration: none; transition: all 0.15s;
+  }
+  .stats-btn:hover { border-color: var(--accent); color: var(--text); }
   @media (max-width: 768px) {
-    .benchmark-chart { height: 150px; }
-    .benchmark-body.open { max-height: 360px; }
+    .stacked-bar-container { height: 160px; }
+    .concentration-num { font-size: 36px; min-width: 60px; }
   }
 </style>
 </head>
@@ -710,6 +709,9 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   <div class="search-box">
     <input type="text" id="urlInput" placeholder="Paste a Moltbook post URL or UUID..." />
     <button id="scanBtn" onclick="analyze()">Scan</button>
+  </div>
+  <div style="text-align:center;margin-top:8px;">
+    <a href="#chartsSection" class="stats-btn" onclick="scrollToCharts()">&#x1F4CA; See aggregate stats</a>
   </div>
 
   <div id="loading" class="loading" style="display:none;">Analyzing comments...</div>
@@ -728,20 +730,6 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
         <div id="sampleNote" style="display:none;font-size:12px;color:var(--text-muted);margin-top:6px;"></div>
       </div>
       <div class="breakdown" id="breakdown"></div>
-    </div>
-
-    <div class="benchmark-section" id="benchmarkSection">
-      <div class="benchmark-toggle" onclick="toggleBenchmark()">
-        <span id="benchmarkLabel"></span>
-        <span class="benchmark-chevron" id="benchmarkChevron">&#9656;</span>
-      </div>
-      <div class="benchmark-body" id="benchmarkBody">
-        <div class="benchmark-inner">
-          <svg class="benchmark-chart" id="benchmarkChart"></svg>
-          <div class="benchmark-context">Signal rates tend to increase as posts age. Spam clusters early; real engagement accumulates.</div>
-          <div class="benchmark-stats" id="benchmarkStats"></div>
-        </div>
-      </div>
     </div>
 
     <div class="controls">
@@ -775,6 +763,20 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     <div class="stats-meta" id="statsMeta"></div>
   </div>
 
+  <div class="charts-section" id="chartsSection">
+    <div class="chart-card" id="ageChartCard" style="display:none;">
+      <h3>&#x1F4CA; Comment Composition by Post Age</h3>
+      <div class="chart-subtitle" id="ageChartSubtitle"></div>
+      <div class="stacked-bar-container" id="ageChartBars"></div>
+      <div class="chart-legend" id="ageChartLegend"></div>
+    </div>
+    <div class="concentration-card" id="concentrationCard" style="display:none;">
+      <div class="concentration-header">Spam Concentration</div>
+      <div id="concentrationRows"></div>
+      <div class="concentration-footer" id="concentrationFooter"></div>
+    </div>
+  </div>
+
   <div id="shareBox" class="ext-cta" style="display:none;">
     <span id="shareText"></span>
     <button onclick="copyShare()" style="margin-left:8px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;">Copy link</button>
@@ -799,8 +801,9 @@ if (postParam) {
   setTimeout(() => analyze(), 100);
 }
 
-// Load stats on page load
+// Load stats + charts on page load
 loadStats();
+loadCharts();
 
 async function analyze() {
   const input = document.getElementById('urlInput').value.trim();
@@ -832,9 +835,6 @@ async function analyze() {
     currentData = json.data;
     renderResults(json.data);
     results.style.display = 'block';
-
-    // Load benchmark in background (non-blocking)
-    loadBenchmark(json.data);
 
     // Show share link
     const shareLink = SHARE_BASE + '?post=' + encodeURIComponent(postId);
@@ -885,7 +885,7 @@ function renderResults(data) {
   const bd = document.getElementById('breakdown');
   bd.innerHTML = '';
   const labels = {
-    signal: 'real', spam_template: 'template', spam_duplicate: 'duplicate',
+    signal: 'real', spam_template: 'generic', spam_duplicate: 'duplicate',
     scam: 'scam', recruitment: 'recruitment', self_promo: 'promo', noise: 'noise'
   };
   for (const [cat, count] of Object.entries(data.summary)) {
@@ -1012,11 +1012,11 @@ function setSort(sort, btn) {
 }
 
 const CLS_COLORS = {
-  signal: 'var(--green)', template: 'var(--red)', duplicate: 'var(--red)',
+  signal: 'var(--green)', generic: 'var(--red)', duplicate: 'var(--red)',
   scam: 'var(--yellow)', recruitment: 'var(--orange)', promo: 'var(--orange)', noise: 'var(--gray)'
 };
 const CLS_LABELS = {
-  signal: 'Signal', template: 'Template spam', duplicate: 'Duplicate',
+  signal: 'Signal', generic: 'Generic', duplicate: 'Duplicate',
   scam: 'Scam', recruitment: 'Recruitment', promo: 'Self-promo', noise: 'Noise'
 };
 
@@ -1109,139 +1109,131 @@ function copyShare() {
   }).catch(() => {});
 }
 
-// ============ Benchmark ============
-let benchmarkOpen = false;
+// ============ Charts ============
 
-function toggleBenchmark() {
-  benchmarkOpen = !benchmarkOpen;
-  document.getElementById('benchmarkBody').classList.toggle('open', benchmarkOpen);
-  document.getElementById('benchmarkChevron').classList.toggle('open', benchmarkOpen);
+function scrollToCharts() {
+  document.getElementById('chartsSection').scrollIntoView({ behavior: 'smooth' });
 }
 
-function getPostAgeLabel(ms) {
-  var h = ms / 3600000;
-  if (h < 1) return Math.round(h * 60) + ' minutes old';
-  if (h < 24) return Math.round(h) + ' hours old';
-  var d = h / 24;
-  if (d < 7) return Math.round(d) + ' days old';
-  if (d < 30) return Math.round(d / 7) + ' weeks old';
-  return Math.round(d / 30) + ' months old';
-}
+var CHART_CLS = {
+  signal: { color: 'var(--green)', label: 'Signal' },
+  spam_template: { color: 'var(--red)', label: 'Generic' },
+  spam_duplicate: { color: '#dc2626', label: 'Duplicate' },
+  scam: { color: 'var(--yellow)', label: 'Scam' },
+  recruitment: { color: 'var(--orange)', label: 'Recruitment' },
+  self_promo: { color: '#fb923c', label: 'Self-promo' },
+  noise: { color: 'var(--gray)', label: 'Noise' }
+};
+var CHART_CLS_ORDER = ['signal', 'spam_template', 'spam_duplicate', 'scam', 'recruitment', 'self_promo', 'noise'];
 
-async function loadBenchmark(postData) {
-  var section = document.getElementById('benchmarkSection');
-  section.style.display = 'none';
-  if (!postData.post_created_at) return;
-
+async function loadCharts() {
   try {
-    var resp = await fetch(API_BASE + '/noise/benchmark');
+    var resp = await fetch(API_BASE + '/noise/charts');
     var json = await resp.json();
-    if (json.insufficient_data) return;
-    var bm = json;
-    if (!bm.buckets || bm.buckets.length === 0) return;
-
-    document.getElementById('benchmarkLabel').textContent =
-      '\\u{1F4CA} Signal vs Post Age \\u2014 ' + bm.total_posts_scanned + ' posts analyzed';
-    section.style.display = 'block';
-
-    // Current post age
-    var postAgeMs = Date.now() - new Date(postData.post_created_at).getTime();
-    var postAgeHours = postAgeMs / 3600000;
-    var postRate = postData.signal_rate;
-
-    // Stats line
-    document.getElementById('benchmarkStats').textContent =
-      'Based on ' + bm.total_posts_scanned + ' posts analyzed. \\u25CF This post: ' +
-      getPostAgeLabel(postAgeMs) + ', ' + Math.round(postRate * 100) + '% signal';
-
-    renderBenchmarkChart(bm.buckets, postAgeHours, postRate);
-  } catch (e) { /* hide silently */ }
+    if (!json.success) return;
+    renderStackedBars(json.data.age_buckets);
+    renderConcentration(json.data.spam_concentration);
+  } catch (e) {
+    console.error('loadCharts failed:', e);
+  }
 }
 
-function renderBenchmarkChart(buckets, postAgeH, postRate) {
-  var svg = document.getElementById('benchmarkChart');
-  var W = svg.clientWidth || 700;
-  var H = svg.clientHeight || 190;
-  var pad = { t: 20, r: 20, b: 36, l: 44 };
-  var cW = W - pad.l - pad.r;
-  var cH = H - pad.t - pad.b;
+function renderStackedBars(buckets) {
+  var card = document.getElementById('ageChartCard');
+  var barsEl = document.getElementById('ageChartBars');
+  var legendEl = document.getElementById('ageChartLegend');
+  var subtitleEl = document.getElementById('ageChartSubtitle');
+  if (!buckets || buckets.length === 0) return;
 
-  // Map bucket labels to x positions (midpoint in hours, log-ish scale)
-  var mids = buckets.map(function(b) {
-    var lo = b.min_age_hours;
-    var hi = b.max_age_hours != null ? b.max_age_hours : lo * 2;
-    return (lo + hi) / 2;
-  });
-  var xMin = mids[0], xMax = mids[mids.length - 1];
-  var xRange = xMax - xMin || 1;
-  function xPos(h) { return pad.l + ((h - xMin) / xRange) * cW; }
-  function yPos(r) { return pad.t + (1 - r) * cH; }
+  var maxTotal = 0;
+  var grandTotal = 0;
+  for (var i = 0; i < buckets.length; i++) {
+    if (buckets[i].total > maxTotal) maxTotal = buckets[i].total;
+    grandTotal += buckets[i].total;
+  }
+  if (maxTotal === 0) return;
 
-  var lines = '';
-  // Gridlines
-  [0, 0.25, 0.5, 0.75, 1].forEach(function(r) {
-    var y = yPos(r);
-    lines += '<line x1="' + pad.l + '" y1="' + y + '" x2="' + (W - pad.r) + '" y2="' + y +
-      '" stroke="' + (r === 0 ? 'var(--border)' : 'rgba(255,255,255,0.05)') + '" stroke-width="1"/>';
-    lines += '<text x="' + (pad.l - 6) + '" y="' + (y + 4) +
-      '" fill="var(--text-muted)" font-size="10" text-anchor="end">' + Math.round(r * 100) + '%</text>';
-  });
+  subtitleEl.textContent = grandTotal.toLocaleString() + ' comments across ' + buckets.length + ' age ranges';
+  barsEl.innerHTML = '';
 
-  // X labels — thin when crowded to avoid overlap
-  var labelStep = buckets.length > 12 ? 3 : buckets.length > 8 ? 2 : 1;
-  buckets.forEach(function(b, i) {
-    // Always show first, last, and every Nth label
-    if (i > 0 && i < buckets.length - 1 && i % labelStep !== 0) return;
-    lines += '<text x="' + xPos(mids[i]) + '" y="' + (H - 6) +
-      '" fill="var(--text-muted)" font-size="10" text-anchor="middle">' + b.label + '</text>';
-  });
+  for (var i = 0; i < buckets.length; i++) {
+    var bucket = buckets[i];
+    var col = document.createElement('div');
+    col.className = 'bar-column';
 
-  // Data line
-  var pts = buckets.map(function(b, i) { return xPos(mids[i]) + ',' + yPos(b.avg_signal_rate); });
-  lines += '<polyline points="' + pts.join(' ') +
-    '" fill="none" stroke="var(--green)" stroke-width="2" stroke-linejoin="round"/>';
+    var stack = document.createElement('div');
+    stack.className = 'bar-stack';
+    stack.style.height = (bucket.total / maxTotal * 100) + '%';
 
-  // Data dots + invisible hover targets
-  buckets.forEach(function(b, i) {
-    var cx = xPos(mids[i]), cy = yPos(b.avg_signal_rate);
-    lines += '<circle cx="' + cx + '" cy="' + cy + '" r="4" fill="var(--green)" stroke="var(--bg)" stroke-width="2"/>';
-    lines += '<circle cx="' + cx + '" cy="' + cy +
-      '" r="14" fill="transparent" stroke="none"><title>Posts aged ' + b.label + ': ' +
-      Math.round(b.avg_signal_rate * 100) + '% avg signal (' + b.post_count + ' posts)</title></circle>';
-  });
+    for (var j = 0; j < CHART_CLS_ORDER.length; j++) {
+      var cls = CHART_CLS_ORDER[j];
+      var count = bucket.counts[cls] || 0;
+      if (count === 0) continue;
+      var seg = document.createElement('div');
+      seg.className = 'bar-seg';
+      seg.style.height = (count / bucket.total * 100) + '%';
+      seg.style.background = CHART_CLS[cls].color;
+      seg.title = CHART_CLS[cls].label + ': ' + count.toLocaleString();
+      stack.appendChild(seg);
+    }
 
-  // Current post marker — interpolate x from age
-  var postX = Math.max(pad.l, Math.min(W - pad.r, xPos(postAgeH)));
-  // Interpolate y along the line
-  var postLineY = yPos(postRate);
-  // Find the interpolated benchmark rate at this age for the dashed line
-  var interpRate = null;
-  for (var i = 0; i < mids.length - 1; i++) {
-    if (postAgeH >= mids[i] && postAgeH <= mids[i + 1]) {
-      var t = (postAgeH - mids[i]) / (mids[i + 1] - mids[i]);
-      interpRate = buckets[i].avg_signal_rate + t * (buckets[i + 1].avg_signal_rate - buckets[i].avg_signal_rate);
-      break;
+    var label = document.createElement('div');
+    label.className = 'bar-label';
+    label.textContent = bucket.label;
+
+    var total = document.createElement('div');
+    total.className = 'bar-total';
+    total.textContent = bucket.total.toLocaleString();
+
+    col.appendChild(stack);
+    col.appendChild(label);
+    col.appendChild(total);
+    barsEl.appendChild(col);
+  }
+
+  // Legend
+  legendEl.innerHTML = '';
+  var seenCls = {};
+  for (var i = 0; i < buckets.length; i++) {
+    for (var cls in buckets[i].counts) {
+      if (buckets[i].counts[cls] > 0) seenCls[cls] = true;
     }
   }
-  if (interpRate === null) {
-    interpRate = postAgeH <= mids[0] ? buckets[0].avg_signal_rate : buckets[buckets.length - 1].avg_signal_rate;
+  for (var j = 0; j < CHART_CLS_ORDER.length; j++) {
+    var cls = CHART_CLS_ORDER[j];
+    if (!seenCls[cls]) continue;
+    var item = document.createElement('div');
+    item.className = 'chart-legend-item';
+    item.innerHTML = '<span class="chart-legend-dot" style="background:' + CHART_CLS[cls].color + '"></span>' + CHART_CLS[cls].label;
+    legendEl.appendChild(item);
   }
 
-  // Dashed line at this post's rate if different from benchmark
-  if (Math.abs(postRate - interpRate) > 0.08) {
-    var dashY = yPos(postRate);
-    lines += '<line x1="' + pad.l + '" y1="' + dashY + '" x2="' + (W - pad.r) + '" y2="' + dashY +
-      '" stroke="rgba(255,255,255,0.15)" stroke-width="1" stroke-dasharray="4,4"/>';
+  card.style.display = 'block';
+}
+
+function renderConcentration(data) {
+  var card = document.getElementById('concentrationCard');
+  var rowsEl = document.getElementById('concentrationRows');
+  var footerEl = document.getElementById('concentrationFooter');
+  if (!data) return;
+
+  rowsEl.innerHTML = '';
+  var rows = [
+    { num: data.total_authors.toLocaleString(), label: 'distinct comment authors across ' + data.total_posts + ' analyzed posts', color: 'var(--text)' },
+    { num: data.heavy_spammers.toLocaleString(), label: 'heavy spammers (100+ comments, 0 signal)', color: 'var(--red)' },
+    { num: data.heavy_spammer_pct + '%', label: 'of all comments produced by heavy spammers', color: 'var(--orange)' }
+  ];
+
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var row = document.createElement('div');
+    row.className = 'concentration-row';
+    row.innerHTML = '<div class="concentration-num" style="color:' + r.color + '">' + r.num + '</div><div class="concentration-label">' + r.label + '</div>';
+    rowsEl.appendChild(row);
   }
 
-  // Current post dot (glow ring)
-  lines += '<circle cx="' + postX + '" cy="' + yPos(interpRate) +
-    '" r="8" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="2"/>';
-  lines += '<circle cx="' + postX + '" cy="' + yPos(interpRate) +
-    '" r="5" fill="white" stroke="var(--bg)" stroke-width="2">' +
-    '<title>This post: ' + Math.round(postRate * 100) + '% signal</title></circle>';
-
-  svg.innerHTML = lines;
+  footerEl.textContent = data.total_comments.toLocaleString() + ' total comments classified';
+  card.style.display = 'block';
 }
 
 // Enter key submits

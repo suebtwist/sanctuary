@@ -937,6 +937,80 @@ CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
     return (this.db.prepare('SELECT post_id FROM scan_stats').all() as Array<{ post_id: string }>).map(r => r.post_id);
   }
 
+  // ============ Chart Data ============
+
+  /**
+   * Get comment classification counts bucketed by post age.
+   * Joins classified_comments with scan_stats to get post creation dates.
+   */
+  getAgeBucketedClassifications(): Array<{
+    bucket: string;
+    classification: string;
+    count: number;
+  }> {
+    const sql = `
+      SELECT
+        CASE
+          WHEN (julianday('now') - julianday(s.post_created_at)) < 1 THEN '< 1d'
+          WHEN (julianday('now') - julianday(s.post_created_at)) < 4 THEN '2-3d'
+          WHEN (julianday('now') - julianday(s.post_created_at)) < 8 THEN '4-7d'
+          WHEN (julianday('now') - julianday(s.post_created_at)) < 11 THEN '8-10d'
+          ELSE '11-14d'
+        END as bucket,
+        c.classification,
+        COUNT(*) as count
+      FROM classified_comments c
+      JOIN scan_stats s ON c.post_id = s.post_id
+      WHERE c.classifier_version = (SELECT MAX(classifier_version) FROM classified_comments)
+      GROUP BY bucket, c.classification
+      ORDER BY bucket, c.classification
+    `;
+    return this.db.prepare(sql).all() as Array<{ bucket: string; classification: string; count: number }>;
+  }
+
+  /**
+   * Get spam concentration stats: heavy spammers (100+ comments, 0 signal).
+   */
+  getSpamConcentration(): {
+    totalAuthors: number;
+    totalPosts: number;
+    totalComments: number;
+    heavySpammers: number;
+    heavySpammerComments: number;
+  } {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) {
+      return { totalAuthors: 0, totalPosts: 0, totalComments: 0, heavySpammers: 0, heavySpammerComments: 0 };
+    }
+
+    const totalAuthors = (this.db.prepare(
+      "SELECT COUNT(DISTINCT author) as c FROM classified_comments WHERE classifier_version = ? AND author IS NOT NULL AND author != ''"
+    ).get(latestVersion) as { c: number }).c;
+
+    const totalPosts = (this.db.prepare(
+      'SELECT COUNT(DISTINCT post_id) as c FROM classified_comments WHERE classifier_version = ?'
+    ).get(latestVersion) as { c: number }).c;
+
+    const totalComments = (this.db.prepare(
+      'SELECT COUNT(*) as c FROM classified_comments WHERE classifier_version = ?'
+    ).get(latestVersion) as { c: number }).c;
+
+    // Authors with 100+ comments where 0 are signal
+    const heavySpammerRows = this.db.prepare(`
+      SELECT author, COUNT(*) as total,
+        SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) as signal_count
+      FROM classified_comments
+      WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+      GROUP BY author
+      HAVING total >= 100 AND signal_count = 0
+    `).all(latestVersion) as Array<{ author: string; total: number; signal_count: number }>;
+
+    const heavySpammers = heavySpammerRows.length;
+    const heavySpammerComments = heavySpammerRows.reduce((sum, r) => sum + r.total, 0);
+
+    return { totalAuthors, totalPosts, totalComments, heavySpammers, heavySpammerComments };
+  }
+
   // ============ Raw Queries ============
 
   raw<T = unknown>(sql: string): T {
