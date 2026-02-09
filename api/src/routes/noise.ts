@@ -493,7 +493,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   .header .shield { font-size: 36px; margin-bottom: 12px; display: block; }
   .header p { color: var(--text-muted); font-size: 16px; }
   .search-box {
-    display: flex; gap: 12px; margin-bottom: 32px;
+    display: flex; gap: 12px; margin-bottom: 0;
   }
   .search-box input {
     flex: 1; padding: 14px 16px; border-radius: 8px;
@@ -686,12 +686,13 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   .concentration-label { font-size: 14px; color: var(--text-muted); line-height: 1.3; }
   .concentration-footer { font-size: 11px; color: var(--text-muted); margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); }
   .stats-btn {
-    display: inline-block; margin-top: 10px; padding: 8px 18px;
-    border-radius: 8px; border: 1px solid var(--border);
-    background: transparent; color: var(--text-muted); font-size: 13px;
-    cursor: pointer; text-decoration: none; transition: all 0.15s;
+    display: inline-block; padding: 10px 24px;
+    border-radius: 8px; border: 1px solid var(--accent);
+    background: rgba(99,102,241,0.12); color: var(--accent); font-size: 14px;
+    font-weight: 600; cursor: pointer; text-decoration: none; transition: all 0.15s;
+    letter-spacing: 0.3px;
   }
-  .stats-btn:hover { border-color: var(--accent); color: var(--text); }
+  .stats-btn:hover { background: rgba(99,102,241,0.25); color: white; border-color: var(--accent); }
   @media (max-width: 768px) {
     .stacked-bar-container { height: 160px; }
     .concentration-num { font-size: 36px; min-width: 60px; }
@@ -710,8 +711,8 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     <input type="text" id="urlInput" placeholder="Paste a Moltbook post URL or UUID..." />
     <button id="scanBtn" onclick="analyze()">Scan</button>
   </div>
-  <div style="text-align:center;margin-top:8px;">
-    <a href="#chartsSection" class="stats-btn" onclick="scrollToCharts()">&#x1F4CA; See aggregate stats</a>
+  <div style="text-align:center;margin-top:12px;margin-bottom:24px;">
+    <a href="#chartsSection" class="stats-btn" onclick="scrollToCharts()">&#x1F4CA; See aggregate stats &darr;</a>
   </div>
 
   <div id="loading" class="loading" style="display:none;">Analyzing comments...</div>
