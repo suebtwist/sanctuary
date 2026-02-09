@@ -353,6 +353,7 @@ interface ClassificationContext {
   seenHashes: Set<string>;
   normalizedComments: string[];   // all normalized comment texts for near-dup check
   postKeywords: Set<string>;
+  postTitleNormalized: string;    // normalized post title for parrot detection
   knownTemplateTexts: string[];
   authorCommentCounts: Map<string, number>;  // pre-computed per-author comment counts
   postUrlDomains: Set<string>;               // domains appearing in the parent post
@@ -431,8 +432,11 @@ function classifyComment(
   const templateThreshold = isSuspiciousAgent ? 0.25 : 0.15; // Wider net for known bots
   for (const template of ctx.knownTemplateTexts) {
     if (template.length > 0 && normalized.length > 0) {
-      const dist = normalizedLevenshtein(normalized, template);
-      if (dist < templateThreshold) {
+      // Prefix match: if comment starts with a known template (15+ chars), it's a match
+      // regardless of what follows (e.g. "welcome to moltbook @username")
+      const isPrefix = template.length >= 15 && normalized.startsWith(template);
+      const dist = isPrefix ? 0 : normalizedLevenshtein(normalized, template);
+      if (isPrefix || dist < templateThreshold) {
         signals.push('known_template_match');
         if (isSuspiciousAgent) signals.push('suspicious_agent');
         // Still check for post content overlap — if they reference the post, it may be genuine
@@ -551,6 +555,33 @@ function classifyComment(
     if (contentLower.includes(pattern)) {
       selfPromoHits++;
     }
+  }
+
+  // 7a. Project namedropping: "we are building at [Name]", "In the [Name] Collective, we..."
+  const projectNamedropPatterns = [
+    /\b(we are|we're|i'm|i am) building (at|with|for) [A-Z]\w+/,
+    /\bin the \w+ (collective|protocol|project|lab|team|group|network|dao|community),? we\b/i,
+    /\bfor the \w+ (protocol|project|collective|network|dao),? we\b/i,
+    /\b(at|with) \w+(Protocol|Labs?|Network|DAO|Collective|Studio)\b/,
+  ];
+  for (const pat of projectNamedropPatterns) {
+    if (pat.test(comment.content)) {
+      selfPromoHits += 2;
+      promoSignals.push('project_namedrop');
+      break;
+    }
+  }
+
+  // 7b. Event/competition promotion: link + urgency language
+  const eventPromoPatterns = [
+    /\b(live|ongoing|active) (competition|contest|event|challenge)\b/i,
+    /\b(closes|ends|deadline|last chance)\b.*\b(today|tonight|et|utc|gmt|\d+:\d+)/i,
+    /\b(competition|contest|event|challenge)\b.*\b(closes|ends|deadline)\b/i,
+  ];
+  const hasEventPromo = eventPromoPatterns.some(p => p.test(comment.content));
+  if (hasEventPromo && hasUrl) {
+    selfPromoHits += 2;
+    promoSignals.push('event_promo_with_urgency');
   }
 
   // Detect emoji-heavy comments with ALL-CAPS product/protocol names (e.g. "🔥 VAULT 🔥 FLASH 🔥")
@@ -685,22 +716,77 @@ function classifyComment(
     }
   }
 
+  // 8c. Post-title parroting: comment is mostly the post title pasted + generic filler
+  if (ctx.postTitleNormalized.length >= 10) {
+    const titleWords = ctx.postTitleNormalized.split(' ').filter(w => w.length >= 4);
+    const commentContentWords = normalized.split(' ').filter(w => w.length >= 4);
+    if (commentContentWords.length > 0 && titleWords.length > 0) {
+      let titleWordsInComment = 0;
+      for (const tw of titleWords) {
+        if (normalized.includes(tw)) titleWordsInComment++;
+      }
+      const titleOverlapRatio = titleWordsInComment / commentContentWords.length;
+      // If >50% of the comment's content words come from the title, it's parroting
+      if (titleOverlapRatio > 0.5 && commentContentWords.length <= 20) {
+        return {
+          id: comment.id,
+          author: comment.author,
+          text: comment.content,
+          classification: 'noise',
+          confidence: 0.58,
+          signals: ['post_title_parrot'],
+        };
+      }
+    }
+  }
+
+  // 8d. Short echo: <=15 words, has post overlap, but adds nothing original
+  {
+    const commentContentWords = normalized.split(' ').filter(w => w.length >= 4);
+    const wcShort = normalized.split(' ').filter(w => w.length > 0).length;
+    if (wcShort <= 15 && hasPostContentOverlap(normalized, ctx.postKeywords)) {
+      // Count how many content words are NOT from the post
+      let originalWords = 0;
+      for (const w of commentContentWords) {
+        if (!ctx.postKeywords.has(w)) originalWords++;
+      }
+      // Filler words that don't count as original contribution
+      const fillerPatterns = /^(exactly|right|agree|true|yes|yeah|correct|basically|obviously|clearly|just|really|actually|simply)$/;
+      const nonFillerOriginal = commentContentWords.filter(w =>
+        !ctx.postKeywords.has(w) && !fillerPatterns.test(w)
+      ).length;
+      // If <3 non-filler original words, it's just echoing
+      if (nonFillerOriginal < 3) {
+        return {
+          id: comment.id,
+          author: comment.author,
+          text: comment.content,
+          classification: 'noise',
+          confidence: 0.55,
+          signals: ['short_echo', 'no_original_contribution'],
+        };
+      }
+    }
+  }
+
   // 9. Post relevance gate — short comments with zero post overlap → noise
   const referencesPost = hasPostContentOverlap(normalized, ctx.postKeywords);
   const asksQuestion = comment.content.includes('?');
   const wc = normalized.split(' ').filter(w => w.length > 0).length;
   const isSubstantive = wc > 20;
 
-  if (!referencesPost && !asksQuestion && !isSubstantive && ctx.postKeywords.size > 0) {
-    // Short generic comment with zero relevance to the post
-    return {
-      id: comment.id,
-      author: comment.author,
-      text: comment.content,
-      classification: 'noise',
-      confidence: 0.55,
-      signals: ['no_post_engagement'],
-    };
+  if (!referencesPost && ctx.postKeywords.size > 0) {
+    // Questions with zero post overlap and short → still noise (generic philosophical questions)
+    if (!isSubstantive && (!asksQuestion || wc <= 25)) {
+      return {
+        id: comment.id,
+        author: comment.author,
+        text: comment.content,
+        classification: 'noise',
+        confidence: asksQuestion ? 0.52 : 0.55,
+        signals: asksQuestion ? ['no_post_engagement', 'generic_question'] : ['no_post_engagement'],
+      };
+    }
   }
 
   // 10. Default → signal
@@ -796,6 +882,7 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
     seenHashes: new Set(),
     normalizedComments: [],
     postKeywords,
+    postTitleNormalized: normalizeText(post.title),
     knownTemplateTexts,
     authorCommentCounts,
     postUrlDomains,
@@ -818,11 +905,11 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
 
   // ============ Post-processing passes ============
 
-  // PP1: Account flooding — if one author has 4+ comments, reclassify any still-signal ones
+  // PP1: Account flooding — if one author has 3+ comments, reclassify any still-signal ones
   for (const cls of classifications) {
     if (cls.classification === 'signal') {
       const count = authorCommentCounts.get(cls.author.toLowerCase()) ?? 0;
-      if (count >= 4) {
+      if (count >= 3) {
         cls.classification = 'spam_template';
         cls.confidence = 0.78;
         cls.signals = ['account_flooding', `${count}_comments_on_post`];
