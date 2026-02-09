@@ -157,12 +157,24 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
 
     const nowMs = Date.now();
     const BUCKETS = [
-      { label: '<1h', min: 0, max: 1 },
-      { label: '1-6h', min: 1, max: 6 },
-      { label: '6-24h', min: 6, max: 24 },
-      { label: '1-3d', min: 24, max: 72 },
-      { label: '3-7d', min: 72, max: 168 },
-      { label: '7-30d', min: 168, max: 720 },
+      { label: '<1h',  min: 0,   max: 1 },
+      { label: '6h',   min: 1,   max: 6 },
+      { label: '24h',  min: 6,   max: 24 },
+      { label: '2d',   min: 24,  max: 48 },
+      { label: '3d',   min: 48,  max: 72 },
+      { label: '4d',   min: 72,  max: 96 },
+      { label: '5d',   min: 96,  max: 120 },
+      { label: '6d',   min: 120, max: 144 },
+      { label: '7d',   min: 144, max: 168 },
+      { label: '8d',   min: 168, max: 192 },
+      { label: '9d',   min: 192, max: 216 },
+      { label: '10d',  min: 216, max: 240 },
+      { label: '11d',  min: 240, max: 264 },
+      { label: '12d',  min: 264, max: 288 },
+      { label: '13d',  min: 288, max: 312 },
+      { label: '14d',  min: 312, max: 336 },
+      { label: '21d',  min: 336, max: 504 },
+      { label: '30d',  min: 504, max: 720 },
       { label: '30d+', min: 720, max: Infinity },
     ];
 
@@ -837,8 +849,11 @@ function renderBenchmarkChart(buckets, postAgeH, postRate) {
       '" fill="var(--text-muted)" font-size="10" text-anchor="end">' + Math.round(r * 100) + '%</text>';
   });
 
-  // X labels
+  // X labels — thin when crowded to avoid overlap
+  var labelStep = buckets.length > 12 ? 3 : buckets.length > 8 ? 2 : 1;
   buckets.forEach(function(b, i) {
+    // Always show first, last, and every Nth label
+    if (i > 0 && i < buckets.length - 1 && i % labelStep !== 0) return;
     lines += '<text x="' + xPos(mids[i]) + '" y="' + (H - 6) +
       '" fill="var(--text-muted)" font-size="10" text-anchor="middle">' + b.label + '</text>';
   });
