@@ -933,6 +933,39 @@ CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
     return (this.db.prepare('SELECT COUNT(DISTINCT post_id) as c FROM classified_comments').get() as { c: number }).c;
   }
 
+  /**
+   * Get per-post signal rates from classified_comments.
+   * Returns total comments, total signal, and per-post signal rates for avg/worst/best.
+   */
+  getClassifiedPostStats(): {
+    totalPosts: number;
+    totalComments: number;
+    totalSignal: number;
+    perPostRates: number[];
+  } {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return { totalPosts: 0, totalComments: 0, totalSignal: 0, perPostRates: [] };
+
+    const rows = this.db.prepare(`
+      SELECT post_id,
+        COUNT(*) as total,
+        SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) as signal_count
+      FROM classified_comments
+      WHERE classifier_version = ?
+      GROUP BY post_id
+    `).all(latestVersion) as Array<{ post_id: string; total: number; signal_count: number }>;
+
+    let totalComments = 0;
+    let totalSignal = 0;
+    const perPostRates: number[] = [];
+    for (const r of rows) {
+      totalComments += r.total;
+      totalSignal += r.signal_count;
+      perPostRates.push(r.total > 0 ? r.signal_count / r.total : 0);
+    }
+    return { totalPosts: rows.length, totalComments, totalSignal, perPostRates };
+  }
+
   getAllScanStatsPostIds(): string[] {
     return (this.db.prepare('SELECT post_id FROM scan_stats').all() as Array<{ post_id: string }>).map(r => r.post_id);
   }

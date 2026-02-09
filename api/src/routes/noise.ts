@@ -104,7 +104,6 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     }
 
     const db = getDb();
-    const analyses = db.getAllNoiseAnalyses();
     const topTemplates = db.getTopTemplates(10);
 
     // Get classification breakdown from classified_comments table
@@ -119,33 +118,21 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
       byClassification[friendlyNames[cls] || cls] = count;
     }
 
-    let totalComments = 0;
-    let totalSignal = 0;
-    let worstRate = 1;
-    let bestRate = 0;
-    let sumRate = 0;
+    // Get per-post stats from classified_comments (persistent, not the cache table)
+    const postStats = db.getClassifiedPostStats();
+    const { totalPosts, totalComments, totalSignal, perPostRates } = postStats;
 
-    for (const row of analyses) {
-      try {
-        const parsed = JSON.parse(row.result_json) as PostAnalysis;
-        totalComments += parsed.total_comments;
-        totalSignal += parsed.signal_count;
-        const rate = parsed.signal_rate;
-        if (rate < worstRate) worstRate = rate;
-        if (rate > bestRate) bestRate = rate;
-        sumRate += rate;
-      } catch {
-        // skip corrupted entries
-      }
-    }
+    let worstRate = perPostRates.length > 0 ? Math.min(...perPostRates) : 0;
+    let bestRate = perPostRates.length > 0 ? Math.max(...perPostRates) : 0;
+    const sumRate = perPostRates.reduce((a, b) => a + b, 0);
 
     const data: NoiseStats = {
-      total_posts_analyzed: analyses.length,
+      total_posts_analyzed: totalPosts,
       total_comments_analyzed: totalComments,
       overall_signal_rate: totalComments > 0 ? Math.round((totalSignal / totalComments) * 100) / 100 : 0,
-      avg_signal_rate: analyses.length > 0 ? Math.round((sumRate / analyses.length) * 100) / 100 : 0,
-      worst_signal_rate: analyses.length > 0 ? worstRate : 0,
-      best_signal_rate: bestRate,
+      avg_signal_rate: totalPosts > 0 ? Math.round((sumRate / totalPosts) * 100) / 100 : 0,
+      worst_signal_rate: totalPosts > 0 ? Math.round(worstRate * 100) / 100 : 0,
+      best_signal_rate: Math.round(bestRate * 100) / 100,
       by_classification: byClassification,
       top_template_phrases: topTemplates.map(t => ({ text: t.normalized_text, count: t.seen_count })),
       classifier_version: CLASSIFIER_VERSION,
