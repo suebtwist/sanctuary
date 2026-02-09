@@ -339,10 +339,6 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     <button id="scanBtn" onclick="analyze()">Scan</button>
   </div>
 
-  <div class="ext-cta">
-    Install the Chrome extension for automatic analysis on every post.
-  </div>
-
   <div id="loading" class="loading" style="display:none;">Analyzing comments...</div>
   <div id="error" class="error" style="display:none;"></div>
 
