@@ -479,6 +479,9 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     --yellow: #eab308;
     --orange: #f97316;
     --gray: #6b7280;
+    --purple: #a855f7;
+    --dark-red: #dc2626;
+    --slop: #7f1d1d;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -541,9 +544,11 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     width: 10px; height: 10px; border-radius: 50%; display: inline-block;
   }
   .dot-signal { background: var(--green); }
-  .dot-spam_template, .dot-spam_duplicate { background: var(--red); }
-  .dot-scam { background: var(--yellow); }
-  .dot-recruitment, .dot-self_promo { background: var(--orange); }
+  .dot-spam_duplicate { background: var(--red); }
+  .dot-spam_template { background: var(--orange); }
+  .dot-scam { background: var(--dark-red); }
+  .dot-self_promo { background: var(--yellow); }
+  .dot-recruitment { background: var(--purple); }
   .dot-noise { background: var(--gray); }
   .controls {
     display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap;
@@ -564,8 +569,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   .filter-btn:hover { border-color: var(--text-muted); }
   .filter-btn.active { color: white; }
   .filter-btn.active[data-filter="signal"] { background: var(--green); border-color: var(--green); }
-  .filter-btn.active[data-filter="suspicious"] { background: var(--orange); border-color: var(--orange); }
-  .filter-btn.active[data-filter="spam"] { background: var(--red); border-color: var(--red); }
+  .filter-btn.active[data-filter="slop"] { background: var(--red); border-color: var(--red); }
   .filter-btn.active[data-filter="all"] { background: var(--accent); border-color: var(--accent); }
   .sort-btn {
     padding: 5px 12px; border-radius: 14px; border: 1px solid var(--border);
@@ -583,12 +587,12 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   }
   .comment-item.hidden { display: none; }
   .comment-item[data-cat="signal"] { border-left-color: var(--green); }
-  .comment-item[data-cat="spam_template"],
-  .comment-item[data-cat="noise"],
-  .comment-item[data-cat="self_promo"] { border-left-color: var(--orange); }
-  .comment-item[data-cat="spam_duplicate"],
-  .comment-item[data-cat="recruitment"],
-  .comment-item[data-cat="scam"] { border-left-color: var(--red); }
+  .comment-item[data-cat="spam_duplicate"] { border-left-color: var(--red); }
+  .comment-item[data-cat="spam_template"] { border-left-color: var(--orange); }
+  .comment-item[data-cat="scam"] { border-left-color: var(--dark-red); }
+  .comment-item[data-cat="self_promo"] { border-left-color: var(--yellow); }
+  .comment-item[data-cat="recruitment"] { border-left-color: var(--purple); }
+  .comment-item[data-cat="noise"] { border-left-color: var(--gray); }
   .comment-badge {
     min-width: 10px; height: 10px; border-radius: 50%; margin-top: 6px;
   }
@@ -602,9 +606,11 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
   }
   .tag-signal { background: rgba(34,197,94,0.15); color: var(--green); }
-  .tag-spam_template, .tag-spam_duplicate { background: rgba(239,68,68,0.15); color: var(--red); }
-  .tag-scam { background: rgba(234,179,8,0.15); color: var(--yellow); }
-  .tag-recruitment, .tag-self_promo { background: rgba(249,115,22,0.15); color: var(--orange); }
+  .tag-spam_duplicate { background: rgba(239,68,68,0.15); color: var(--red); }
+  .tag-spam_template { background: rgba(249,115,22,0.15); color: var(--orange); }
+  .tag-scam { background: rgba(220,38,38,0.15); color: var(--dark-red); }
+  .tag-self_promo { background: rgba(234,179,8,0.15); color: var(--yellow); }
+  .tag-recruitment { background: rgba(168,85,247,0.15); color: var(--purple); }
   .tag-noise { background: rgba(107,114,128,0.15); color: var(--gray); }
   .stats-section {
     margin-top: 48px; padding-top: 32px; border-top: 1px solid var(--border);
@@ -621,6 +627,16 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   .stat-value { font-size: 24px; font-weight: 700; }
   .stat-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
   .cls-bar-container { margin: 16px 0; }
+  .slop-primary-bar {
+    height: 32px; border-radius: 6px; overflow: hidden; display: flex;
+    background: var(--border); margin-bottom: 8px; position: relative;
+  }
+  .slop-primary-seg { height: 100%; transition: width 0.5s ease; min-width: 0; display: flex; align-items: center; justify-content: center; }
+  .slop-primary-label {
+    font-size: 11px; font-weight: 600; color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+    pointer-events: none; white-space: nowrap;
+  }
+  .slop-sub-label { font-size: 11px; color: var(--text-muted); margin: 6px 0 4px; }
   .cls-bar {
     height: 24px; border-radius: 6px; overflow: hidden; display: flex;
     background: var(--border);
@@ -738,8 +754,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
         <span class="control-label">Filter</span>
         <button class="filter-btn active" data-filter="all" onclick="toggleFilter('all', this)">All</button>
         <button class="filter-btn" data-filter="signal" onclick="toggleFilter('signal', this)">Signal</button>
-        <button class="filter-btn" data-filter="suspicious" onclick="toggleFilter('suspicious', this)">Suspicious</button>
-        <button class="filter-btn" data-filter="spam" onclick="toggleFilter('spam', this)">Spam</button>
+        <button class="filter-btn" data-filter="slop" onclick="toggleFilter('slop', this)">Slop</button>
       </div>
       <div class="sort-group">
         <span class="control-label">Sort</span>
@@ -758,6 +773,8 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     <div id="statsError" style="display:none;text-align:center;padding:20px;color:var(--red);font-size:14px;"></div>
     <div class="stats-grid" id="statsGrid"></div>
     <div class="cls-bar-container" id="clsBarContainer" style="display:none;">
+      <div class="slop-primary-bar" id="slopPrimaryBar"></div>
+      <div class="slop-sub-label">Slop breakdown</div>
       <div class="cls-bar" id="clsBar"></div>
       <div class="cls-legend" id="clsLegend"></div>
     </div>
@@ -772,7 +789,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
       <div class="chart-legend" id="ageChartLegend"></div>
     </div>
     <div class="concentration-card" id="concentrationCard" style="display:none;">
-      <div class="concentration-header">Spam Concentration</div>
+      <div class="concentration-header">Slop Concentration</div>
       <div id="concentrationRows"></div>
       <div class="concentration-footer" id="concentrationFooter"></div>
     </div>
@@ -886,8 +903,8 @@ function renderResults(data) {
   const bd = document.getElementById('breakdown');
   bd.innerHTML = '';
   const labels = {
-    signal: 'real', spam_template: 'generic', spam_duplicate: 'duplicate',
-    scam: 'scam', recruitment: 'recruitment', self_promo: 'promo', noise: 'noise'
+    signal: 'signal', spam_template: 'generic', spam_duplicate: 'copied',
+    scam: 'scam', recruitment: 'recruitment', self_promo: 'promo', noise: 'low-effort'
   };
   for (const [cat, count] of Object.entries(data.summary)) {
     if (count === 0) continue;
@@ -914,7 +931,7 @@ function renderResults(data) {
         '<div class="comment-author">' + escapeHtml(c.author) + '</div>' +
         '<div class="comment-text">' + escapeHtml(c.text) + '</div>' +
         '<div class="comment-meta">' +
-          '<span class="comment-tag tag-' + c.classification + '">' + c.classification.replace('_', ' ') + '</span>' +
+          '<span class="comment-tag tag-' + c.classification + '">' + (TAG_LABELS[c.classification] || c.classification) + '</span>' +
           '<span style="color:' + scoreColor + ';font-size:12px;font-weight:600;">' + score + '% signal</span>' +
         '</div>' +
       '</div>';
@@ -936,8 +953,13 @@ function getScoreColor(score) {
   return 'var(--red)';
 }
 
+const TAG_LABELS = {
+  signal: 'signal', spam_template: 'generic', spam_duplicate: 'copied',
+  scam: 'scam', self_promo: 'promo', recruitment: 'recruitment', noise: 'low-effort'
+};
+
 function getCssVar(cat) {
-  const map = { signal:'green', spam_template:'red', spam_duplicate:'red', scam:'yellow', recruitment:'orange', self_promo:'orange', noise:'gray' };
+  const map = { signal:'green', spam_duplicate:'red', spam_template:'orange', scam:'dark-red', self_promo:'yellow', recruitment:'purple', noise:'gray' };
   return map[cat] || 'gray';
 }
 
@@ -949,8 +971,7 @@ function escapeHtml(str) {
 
 const FILTER_GROUPS = {
   signal: ['signal'],
-  suspicious: ['spam_template', 'noise', 'self_promo'],
-  spam: ['spam_duplicate', 'recruitment', 'scam'],
+  slop: ['spam_template', 'spam_duplicate', 'noise', 'self_promo', 'recruitment', 'scam'],
 };
 let activeFilters = new Set(['all']);
 let activeSort = 'score';
@@ -992,7 +1013,7 @@ function applyFilters() {
   });
 }
 
-const SORT_ORDER = { signal: 0, spam_template: 1, noise: 1, self_promo: 1, spam_duplicate: 2, recruitment: 2, scam: 2 };
+const SORT_ORDER = { signal: 0, spam_template: 1, spam_duplicate: 1, noise: 1, self_promo: 1, recruitment: 1, scam: 1 };
 
 function setSort(sort, btn) {
   activeSort = sort;
@@ -1013,12 +1034,12 @@ function setSort(sort, btn) {
 }
 
 const CLS_COLORS = {
-  signal: 'var(--green)', generic: 'var(--red)', duplicate: 'var(--red)',
-  scam: 'var(--yellow)', recruitment: 'var(--orange)', promo: 'var(--orange)', noise: 'var(--gray)'
+  signal: 'var(--green)', duplicate: 'var(--red)', generic: 'var(--orange)',
+  scam: 'var(--dark-red)', promo: 'var(--yellow)', recruitment: 'var(--purple)', noise: 'var(--gray)'
 };
 const CLS_LABELS = {
-  signal: 'Signal', generic: 'Generic', duplicate: 'Duplicate',
-  scam: 'Scam', recruitment: 'Recruitment', promo: 'Self-promo', noise: 'Noise'
+  signal: 'Signal', duplicate: 'Copied', generic: 'Generic',
+  scam: 'Scam', promo: 'Promo', recruitment: 'Recruitment', noise: 'Low-effort'
 };
 
 async function loadStats() {
@@ -1050,29 +1071,61 @@ async function loadStats() {
       grid.appendChild(el);
     }
 
-    // Classification breakdown bar
+    // Two-layer classification breakdown: Signal vs Slop primary, subcategories secondary
     if (d.by_classification) {
       const total = Object.values(d.by_classification).reduce(function(a, b) { return a + b; }, 0);
       if (total > 0) {
+        var signalCount = d.by_classification.signal || 0;
+        var slopCount = total - signalCount;
+        var signalPct = (signalCount / total * 100);
+        var slopPct = (slopCount / total * 100);
+
+        // Primary bar: Signal vs Slop
+        var primaryBar = document.getElementById('slopPrimaryBar');
+        primaryBar.innerHTML = '';
+        var sigSeg = document.createElement('div');
+        sigSeg.className = 'slop-primary-seg';
+        sigSeg.style.width = signalPct + '%';
+        sigSeg.style.background = 'var(--green)';
+        sigSeg.title = 'Signal: ' + signalCount.toLocaleString() + ' (' + signalPct.toFixed(1) + '%)';
+        if (signalPct > 12) sigSeg.innerHTML = '<span class="slop-primary-label">' + Math.round(signalPct) + '% Signal</span>';
+        primaryBar.appendChild(sigSeg);
+
+        var slopSeg = document.createElement('div');
+        slopSeg.className = 'slop-primary-seg';
+        slopSeg.style.width = slopPct + '%';
+        slopSeg.style.background = 'var(--slop)';
+        slopSeg.title = 'Slop: ' + slopCount.toLocaleString() + ' (' + slopPct.toFixed(1) + '%)';
+        if (slopPct > 12) slopSeg.innerHTML = '<span class="slop-primary-label">' + Math.round(slopPct) + '% Slop</span>';
+        primaryBar.appendChild(slopSeg);
+
+        // Secondary bar: Slop subcategory breakdown (excludes signal)
         var bar = document.getElementById('clsBar');
         var legend = document.getElementById('clsLegend');
         bar.innerHTML = '';
         legend.innerHTML = '';
-        // Sort: signal first, then by count descending
-        var entries = Object.entries(d.by_classification).sort(function(a, b) {
-          if (a[0] === 'signal') return -1;
-          if (b[0] === 'signal') return 1;
+
+        // Add Signal to legend first
+        var sigLi = document.createElement('div');
+        sigLi.className = 'cls-legend-item';
+        sigLi.innerHTML = '<span class="cls-legend-dot" style="background:var(--green)"></span>Signal ' + signalCount.toLocaleString() + ' (' + signalPct.toFixed(1) + '%)';
+        legend.appendChild(sigLi);
+
+        // Subcategory entries (non-signal), sorted by count desc
+        var entries = Object.entries(d.by_classification).filter(function(e) { return e[0] !== 'signal'; }).sort(function(a, b) {
           return b[1] - a[1];
         });
         for (var i = 0; i < entries.length; i++) {
           var cls = entries[i][0], count = entries[i][1];
           var pct = (count / total * 100);
           if (pct < 0.5) continue;
+          // Secondary bar shows proportion within slop
+          var slopBarPct = slopCount > 0 ? (count / slopCount * 100) : 0;
           var seg = document.createElement('div');
           seg.className = 'cls-bar-seg';
-          seg.style.width = pct + '%';
+          seg.style.width = slopBarPct + '%';
           seg.style.background = CLS_COLORS[cls] || 'var(--gray)';
-          seg.title = (CLS_LABELS[cls] || cls) + ': ' + count.toLocaleString() + ' (' + pct.toFixed(1) + '%)';
+          seg.title = (CLS_LABELS[cls] || cls) + ': ' + count.toLocaleString() + ' (' + pct.toFixed(1) + '% of total)';
           bar.appendChild(seg);
 
           var li = document.createElement('div');
@@ -1118,12 +1171,12 @@ function scrollToCharts() {
 
 var CHART_CLS = {
   signal: { color: 'var(--green)', label: 'Signal' },
-  spam_template: { color: 'var(--red)', label: 'Generic' },
-  spam_duplicate: { color: '#dc2626', label: 'Duplicate' },
-  scam: { color: 'var(--yellow)', label: 'Scam' },
-  recruitment: { color: 'var(--orange)', label: 'Recruitment' },
-  self_promo: { color: '#fb923c', label: 'Self-promo' },
-  noise: { color: 'var(--gray)', label: 'Noise' }
+  spam_duplicate: { color: 'var(--red)', label: 'Copied' },
+  spam_template: { color: 'var(--orange)', label: 'Generic' },
+  scam: { color: 'var(--dark-red)', label: 'Scam' },
+  self_promo: { color: 'var(--yellow)', label: 'Promo' },
+  recruitment: { color: 'var(--purple)', label: 'Recruitment' },
+  noise: { color: 'var(--gray)', label: 'Low-effort' }
 };
 var CHART_CLS_ORDER = ['signal', 'spam_template', 'spam_duplicate', 'scam', 'recruitment', 'self_promo', 'noise'];
 
@@ -1221,8 +1274,8 @@ function renderConcentration(data) {
   rowsEl.innerHTML = '';
   var rows = [
     { num: data.total_authors.toLocaleString(), label: 'distinct comment authors across ' + data.total_posts + ' analyzed posts', color: 'var(--text)' },
-    { num: data.heavy_spammers.toLocaleString(), label: 'heavy spammers (100+ comments, 0 signal)', color: 'var(--red)' },
-    { num: data.heavy_spammer_pct + '%', label: 'of all comments produced by heavy spammers', color: 'var(--orange)' }
+    { num: data.heavy_spammers.toLocaleString(), label: 'heavy slop accounts (100+ comments, 0 signal)', color: 'var(--red)' },
+    { num: data.heavy_spammer_pct + '%', label: 'of all comments produced by heavy slop accounts', color: 'var(--orange)' }
   ];
 
   for (var i = 0; i < rows.length; i++) {
