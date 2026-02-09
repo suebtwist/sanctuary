@@ -1071,14 +1071,20 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
 
   // ============ Post-processing passes ============
 
-  // PP1: Account flooding — if one author has 3+ comments, reclassify any still-signal ones
+  // PP1: Account flooding — if one author has 3+ comments, reclassify weak-signal ones.
+  // Exempt comments with strong engagement (references post + substantive length):
+  // a long comment that directly engages with the post is real even if the author is prolific.
   for (const cls of classifications) {
     if (cls.classification === 'signal') {
       const count = authorCommentCounts.get(cls.author.toLowerCase()) ?? 0;
       if (count >= 3) {
-        cls.classification = 'spam_template';
-        cls.confidence = 0.78;
-        cls.signals = ['account_flooding', `${count}_comments_on_post`];
+        const wc = cls.text.split(/\s+/).length;
+        const isDeepEngagement = cls.confidence >= 0.85 && wc > 30;
+        if (!isDeepEngagement) {
+          cls.classification = 'spam_template';
+          cls.confidence = 0.78;
+          cls.signals = ['account_flooding', `${count}_comments_on_post`];
+        }
       }
     }
   }
