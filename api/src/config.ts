@@ -47,6 +47,11 @@ export interface Config {
   irysMinBalanceWei: bigint;
   irysChainId: number;
   irysRpcUrl: string;
+
+  // Noise filter
+  moltbookApiKey: string;
+  noiseCacheTtlSeconds: number;
+  noiseRateLimit: number;
 }
 
 function requireEnv(name: string): string {
@@ -116,6 +121,11 @@ export function loadConfig(): Config {
     irysMinBalanceWei: BigInt(optionalEnv('IRYS_MIN_BALANCE_WEI', '0')),
     irysChainId: parseInt(optionalEnv('IRYS_CHAIN_ID', '8453'), 10),
     irysRpcUrl: optionalEnv('IRYS_RPC_URL', 'https://mainnet.base.org'), // 0.001 ETH
+
+    // Noise filter
+    moltbookApiKey: optionalEnv('MOLTBOOK_API_KEY', ''),
+    noiseCacheTtlSeconds: optionalEnvInt('NOISE_CACHE_TTL_SECONDS', 600), // 10 minutes
+    noiseRateLimit: optionalEnvInt('NOISE_RATE_LIMIT', 30),
   };
 }
 
@@ -143,6 +153,9 @@ export function validateConfig(config: Config): string[] {
     }
     if (config.proofSigningKey === config.jwtSecret) {
       console.warn('  WARNING: PROOF_SIGNING_KEY should be different from JWT_SECRET in production');
+    }
+    if (!config.moltbookApiKey) {
+      console.warn('  WARNING: MOLTBOOK_API_KEY not set — noise filter disabled');
     }
   }
 

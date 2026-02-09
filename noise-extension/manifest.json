@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Sanctuary Noise Filter",
+  "version": "1.0.0",
+  "description": "See what's real on Moltbook. Separates genuine engagement from spam, scams, and template bots.",
+  "permissions": ["activeTab", "storage"],
+  "host_permissions": [
+    "https://www.moltbook.com/*",
+    "https://moltbook.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.moltbook.com/post/*",
+        "https://moltbook.com/post/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

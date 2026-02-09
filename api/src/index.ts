@@ -18,6 +18,7 @@ import { heartbeatRoutes } from './routes/heartbeat.js';
 import { backupRoutes } from './routes/backups.js';
 import { attestationRoutes } from './routes/attestations.js';
 import { statsRoutes } from './routes/stats.js';
+import { noiseRoutes } from './routes/noise.js';
 import { detectFallenAgents } from './services/trust-calculator.js';
 
 async function main() {
@@ -54,6 +55,7 @@ async function main() {
   } else {
     console.log('  Arweave uploads: SIMULATED (set ARWEAVE_ENABLED=true to enable)');
   }
+  console.log(`  Noise filter: ${config.moltbookApiKey ? 'ENABLED' : 'DISABLED (no MOLTBOOK_API_KEY)'}`);
 
   // Initialize database
   console.log(`Initializing database at ${config.databasePath}...`);
@@ -123,6 +125,7 @@ async function main() {
   await fastify.register(backupRoutes, { prefix: '/backups' });
   await fastify.register(attestationRoutes, { prefix: '/attestations' });
   await fastify.register(statsRoutes, { prefix: '/stats' });
+  await fastify.register(noiseRoutes, { prefix: '/noise' });
 
   // Graceful shutdown
   const shutdown = async () => {
@@ -170,6 +173,20 @@ async function main() {
         fastify.log.error(err, 'Failed to prune heartbeats');
       }
     }, 60 * 60 * 1000);
+
+    // Periodic cleanup: expired noise analysis cache every 30 minutes
+    setInterval(() => {
+      try {
+        const db = getDb();
+        const config = getConfig();
+        const removed = db.cleanupExpiredNoiseAnalysis(config.noiseCacheTtlSeconds * 6); // Keep entries for ~1 hour
+        if (removed > 0) {
+          fastify.log.info({ removed }, 'Cleaned up expired noise analysis cache');
+        }
+      } catch (err) {
+        fastify.log.error(err, 'Failed to cleanup noise analysis cache');
+      }
+    }, 30 * 60 * 1000);
 
     // Periodic job: detect fallen agents every 6 hours
     setInterval(async () => {

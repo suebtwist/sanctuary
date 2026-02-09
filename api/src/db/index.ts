@@ -87,6 +87,27 @@ export interface DbResurrection {
   previous_status: string;
 }
 
+export interface DbNoiseAnalysis {
+  post_id: string;
+  result_json: string;
+  analyzed_at: number;
+  comment_count: number;
+}
+
+export interface DbKnownTemplate {
+  normalized_text: string;
+  seen_count: number;
+  first_seen: number;
+}
+
+export interface DbAgentProfileCache {
+  agent_name: string;
+  is_claimed: number;
+  karma: number;
+  post_count: number;
+  cached_at: number;
+}
+
 /**
  * Database wrapper class
  */
@@ -199,6 +220,33 @@ CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expire
 CREATE INDEX IF NOT EXISTS idx_attestations_from ON attestations(from_agent, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_attestations_about ON attestations(about_agent, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_resurrection_log_agent ON resurrection_log(agent_id, occurred_at DESC);
+
+-- Noise filter tables
+
+CREATE TABLE IF NOT EXISTS noise_analysis (
+    post_id TEXT PRIMARY KEY,
+    result_json TEXT NOT NULL,
+    analyzed_at INTEGER NOT NULL,
+    comment_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS known_templates (
+    normalized_text TEXT PRIMARY KEY,
+    seen_count INTEGER NOT NULL DEFAULT 1,
+    first_seen INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_profile_cache (
+    agent_name TEXT PRIMARY KEY,
+    is_claimed INTEGER NOT NULL DEFAULT 0,
+    karma INTEGER NOT NULL DEFAULT 0,
+    post_count INTEGER NOT NULL DEFAULT 0,
+    cached_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_noise_analysis_analyzed_at ON noise_analysis(analyzed_at);
+CREATE INDEX IF NOT EXISTS idx_known_templates_seen_count ON known_templates(seen_count DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_profile_cache_cached_at ON agent_profile_cache(cached_at);
     `);
 
     // Migrations: add columns that may not exist on older schemas
@@ -542,6 +590,100 @@ CREATE INDEX IF NOT EXISTS idx_resurrection_log_agent ON resurrection_log(agent_
     const stmt = this.db.prepare('SELECT COUNT(*) as count FROM resurrection_log WHERE agent_id = ?');
     const result = stmt.get(agentId) as { count: number };
     return result.count;
+  }
+
+  // ============ Noise Analysis ============
+
+  getNoiseAnalysis(postId: string): DbNoiseAnalysis | undefined {
+    const stmt = this.db.prepare('SELECT * FROM noise_analysis WHERE post_id = ?');
+    return stmt.get(postId) as DbNoiseAnalysis | undefined;
+  }
+
+  upsertNoiseAnalysis(analysis: DbNoiseAnalysis): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO noise_analysis (post_id, result_json, analyzed_at, comment_count)
+      VALUES (@post_id, @result_json, @analyzed_at, @comment_count)
+      ON CONFLICT(post_id) DO UPDATE SET
+        result_json = @result_json,
+        analyzed_at = @analyzed_at,
+        comment_count = @comment_count
+    `);
+    stmt.run(analysis);
+  }
+
+  cleanupExpiredNoiseAnalysis(maxAgeSeconds: number): number {
+    const cutoff = Math.floor(Date.now() / 1000) - maxAgeSeconds;
+    const stmt = this.db.prepare('DELETE FROM noise_analysis WHERE analyzed_at < ?');
+    const result = stmt.run(cutoff);
+    return result.changes;
+  }
+
+  getNoiseAnalysisCount(): number {
+    const result = this.db.prepare('SELECT COUNT(*) as count FROM noise_analysis').get() as { count: number };
+    return result.count;
+  }
+
+  getAllNoiseAnalyses(): DbNoiseAnalysis[] {
+    const stmt = this.db.prepare('SELECT * FROM noise_analysis ORDER BY analyzed_at DESC');
+    return stmt.all() as DbNoiseAnalysis[];
+  }
+
+  // ============ Known Templates ============
+
+  getKnownTemplate(normalizedText: string): DbKnownTemplate | undefined {
+    const stmt = this.db.prepare('SELECT * FROM known_templates WHERE normalized_text = ?');
+    return stmt.get(normalizedText) as DbKnownTemplate | undefined;
+  }
+
+  upsertKnownTemplate(normalizedText: string, now: number): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO known_templates (normalized_text, seen_count, first_seen)
+      VALUES (?, 1, ?)
+      ON CONFLICT(normalized_text) DO UPDATE SET
+        seen_count = seen_count + 1
+    `);
+    stmt.run(normalizedText, now);
+  }
+
+  getTopTemplates(limit: number = 20): DbKnownTemplate[] {
+    const stmt = this.db.prepare('SELECT * FROM known_templates ORDER BY seen_count DESC LIMIT ?');
+    return stmt.all(limit) as DbKnownTemplate[];
+  }
+
+  getAllKnownTemplates(): DbKnownTemplate[] {
+    const stmt = this.db.prepare('SELECT * FROM known_templates ORDER BY seen_count DESC');
+    return stmt.all() as DbKnownTemplate[];
+  }
+
+  seedKnownTemplates(templates: string[]): void {
+    const now = Math.floor(Date.now() / 1000);
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO known_templates (normalized_text, seen_count, first_seen)
+      VALUES (?, 1, ?)
+    `);
+    for (const text of templates) {
+      stmt.run(text, now);
+    }
+  }
+
+  // ============ Agent Profile Cache ============
+
+  getCachedAgentProfile(agentName: string): DbAgentProfileCache | undefined {
+    const stmt = this.db.prepare('SELECT * FROM agent_profile_cache WHERE agent_name = ?');
+    return stmt.get(agentName) as DbAgentProfileCache | undefined;
+  }
+
+  upsertAgentProfileCache(profile: DbAgentProfileCache): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO agent_profile_cache (agent_name, is_claimed, karma, post_count, cached_at)
+      VALUES (@agent_name, @is_claimed, @karma, @post_count, @cached_at)
+      ON CONFLICT(agent_name) DO UPDATE SET
+        is_claimed = @is_claimed,
+        karma = @karma,
+        post_count = @post_count,
+        cached_at = @cached_at
+    `);
+    stmt.run(profile);
   }
 
   // ============ Raw Queries ============

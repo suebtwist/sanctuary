@@ -78,4 +78,17 @@ export function configureRateLimits(fastify: FastifyInstance): void {
       };
     }
   });
+
+  // Noise analysis: 30 per minute per IP (default, configurable via NOISE_RATE_LIMIT)
+  fastify.addHook('onRoute', (routeOptions) => {
+    if (routeOptions.url === '/noise/analyze' && routeOptions.method === 'GET') {
+      routeOptions.config = {
+        ...routeOptions.config,
+        rateLimit: {
+          max: 30,
+          timeWindow: '1 minute',
+        },
+      };
+    }
+  });
 }

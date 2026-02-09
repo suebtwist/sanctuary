@@ -1,0 +1,154 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #0f1117;
+  color: #e2e4e9;
+  width: 320px;
+}
+
+.popup {
+  padding: 16px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #2a2d3a;
+}
+
+.shield {
+  font-size: 20px;
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.section {
+  margin-bottom: 16px;
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #8b8fa3;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.muted {
+  color: #8b8fa3;
+  font-size: 13px;
+}
+
+.post-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  line-height: 1.3;
+}
+
+.signal-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.signal-row strong {
+  color: #22c55e;
+}
+
+.bar {
+  flex: 1;
+  height: 6px;
+  background: #2a2d3a;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  background: #22c55e;
+  border-radius: 3px;
+}
+
+.rate {
+  font-weight: 600;
+  color: #8b8fa3;
+  font-size: 13px;
+}
+
+.breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.breakdown-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #8b8fa3;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dot-signal { background: #22c55e; }
+.dot-spam_template, .dot-spam_duplicate { background: #ef4444; }
+.dot-scam { background: #eab308; }
+.dot-recruitment, .dot-self_promo { background: #f97316; }
+.dot-noise { background: #6b7280; }
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.stat-row span {
+  color: #8b8fa3;
+}
+
+.stat-row strong {
+  color: #e2e4e9;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 12px;
+  border-top: 1px solid #2a2d3a;
+  font-size: 12px;
+}
+
+.footer a {
+  color: #6366f1;
+  text-decoration: none;
+}
+
+.footer a:hover {
+  text-decoration: underline;
+}
+
+.version {
+  color: #8b8fa3;
+}

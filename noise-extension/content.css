@@ -1,0 +1,171 @@
+/* Sanctuary Noise Filter — Injected Styles */
+
+.snf-banner {
+  background: #1a1d27;
+  border: 1px solid #2a2d3a;
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin: 16px 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color: #e2e4e9;
+}
+
+.snf-banner-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #8b8fa3;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.snf-signal-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.snf-signal-label {
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.snf-signal-label strong {
+  color: #22c55e;
+  font-size: 18px;
+}
+
+.snf-signal-bar {
+  flex: 1;
+  height: 8px;
+  background: #2a2d3a;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.snf-signal-bar-fill {
+  height: 100%;
+  background: #22c55e;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.snf-signal-rate {
+  font-size: 14px;
+  font-weight: 600;
+  color: #8b8fa3;
+}
+
+.snf-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.snf-breakdown-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: #8b8fa3;
+}
+
+.snf-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.snf-dot-signal { background: #22c55e; }
+.snf-dot-spam_template, .snf-dot-spam_duplicate { background: #ef4444; }
+.snf-dot-scam { background: #eab308; }
+.snf-dot-recruitment, .snf-dot-self_promo { background: #f97316; }
+.snf-dot-noise { background: #6b7280; }
+
+.snf-filters {
+  display: flex;
+  gap: 8px;
+}
+
+.snf-filter-btn {
+  padding: 5px 12px;
+  border-radius: 14px;
+  border: 1px solid #2a2d3a;
+  background: transparent;
+  color: #8b8fa3;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.snf-filter-btn:hover {
+  border-color: #6366f1;
+  color: #e2e4e9;
+}
+
+.snf-filter-btn.snf-active {
+  background: #6366f1;
+  color: white;
+  border-color: #6366f1;
+}
+
+/* Comment badges */
+.snf-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.snf-badge-signal { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+.snf-badge-spam_template, .snf-badge-spam_duplicate { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+.snf-badge-scam { background: rgba(234, 179, 8, 0.15); color: #eab308; }
+.snf-badge-recruitment, .snf-badge-self_promo { background: rgba(249, 115, 22, 0.15); color: #f97316; }
+.snf-badge-noise { background: rgba(107, 114, 128, 0.15); color: #6b7280; }
+
+/* Filter visibility */
+.snf-hidden {
+  display: none !important;
+}
+
+.snf-collapsed-notice {
+  padding: 8px 16px;
+  color: #8b8fa3;
+  font-size: 13px;
+  font-style: italic;
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.snf-collapsed-notice:hover {
+  color: #e2e4e9;
+}
+
+/* Loading state */
+.snf-loading {
+  text-align: center;
+  padding: 16px;
+  color: #8b8fa3;
+  font-size: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.snf-error {
+  text-align: center;
+  padding: 16px;
+  color: #ef4444;
+  font-size: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}

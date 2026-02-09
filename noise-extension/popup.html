@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup">
+    <div class="header">
+      <span class="shield">&#x1F6E1;</span>
+      <span class="title">Sanctuary Noise Filter</span>
+    </div>
+
+    <div id="loading" class="section muted">Loading...</div>
+
+    <div id="postAnalysis" class="section" style="display:none;">
+      <div class="label">Current Post</div>
+      <div id="postTitle" class="post-title"></div>
+      <div class="signal-row">
+        <span>Signal:</span>
+        <strong id="signalCount"></strong>
+        <div class="bar"><div class="bar-fill" id="barFill"></div></div>
+        <span id="signalRate" class="rate"></span>
+      </div>
+      <div id="breakdown" class="breakdown"></div>
+    </div>
+
+    <div id="stats" class="section" style="display:none;">
+      <div class="label">Platform Stats</div>
+      <div class="stat-row"><span>Posts analyzed</span><strong id="totalPosts"></strong></div>
+      <div class="stat-row"><span>Comments scanned</span><strong id="totalComments"></strong></div>
+      <div class="stat-row"><span>Avg signal rate</span><strong id="avgRate"></strong></div>
+    </div>
+
+    <div class="footer">
+      <a href="https://sanctuary-ops.xyz" target="_blank">sanctuary-ops.xyz</a>
+      <span class="version">v1.0.0</span>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
