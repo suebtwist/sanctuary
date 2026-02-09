@@ -67,6 +67,10 @@ const inFlight = new Map<string, Promise<PostAnalysis | null>>();
 // ============ Cross-Post Duplicate Index (v0.1.1) ============
 // Maintained across all posts in a server's lifetime. Rebuilt on restart.
 
+// Skip Step 0b Levenshtein for authors with more than this many cross-post comments.
+// Heavy authors (0xYeks 2k+, MoltbotOne 1k+) are caught by SUSPICIOUS_AGENTS, templates, and 0a exact hash.
+const CROSS_POST_LEVENSHTEIN_AUTHOR_CAP = 50;
+
 interface CrossPostEntry { postId: string; commentId: string; }
 
 const crossPostExactHashes = new Map<string, Map<string, CrossPostEntry[]>>();  // author → hash → entries
@@ -94,20 +98,25 @@ function checkCrossPostDuplicate(
   }
 
   // Step 0b: Near cross-post duplicate (only for authors appearing on 2+ posts)
+  // Performance cap: skip Levenshtein for high-volume authors (>50 cross-post comments).
+  // Those authors are handled by SUSPICIOUS_AGENTS, template matching, and Step 0a exact hash.
   const authorComments = crossPostCommentsByAuthor.get(authorKey);
-  if (authorComments) {
+  if (authorComments && authorComments.length <= CROSS_POST_LEVENSHTEIN_AUTHOR_CAP) {
     const otherPostComments = authorComments.filter(c => c.postId !== postId);
     if (otherPostComments.length > 0 && normalizedText.length > 0) {
+      const curLen = normalizedText.length;
       for (const prev of otherPostComments) {
-        if (prev.normalizedText.length > 0) {
-          const dist = normalizedLevenshtein(normalizedText, prev.normalizedText);
-          if (dist < 0.20) {
-            return {
-              id: commentId, author, text: '',
-              classification: 'spam_duplicate', confidence: 0.88,
-              signals: ['cross_post_near_duplicate'],
-            };
-          }
+        if (prev.normalizedText.length === 0) continue;
+        // Length pre-check: if lengths differ by >25%, Levenshtein can't be < 0.20 — skip
+        const lenDiff = Math.abs(curLen - prev.normalizedText.length);
+        if (lenDiff / Math.max(curLen, prev.normalizedText.length) > 0.25) continue;
+        const dist = normalizedLevenshtein(normalizedText, prev.normalizedText);
+        if (dist < 0.20) {
+          return {
+            id: commentId, author, text: '',
+            classification: 'spam_duplicate', confidence: 0.88,
+            signals: ['cross_post_near_duplicate'],
+          };
         }
       }
     }

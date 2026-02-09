@@ -31,6 +31,8 @@ Module-level index persists across server lifetime. Per-author tracking.
 | 0a: Exact hash on different post | SHA-256 match | 0.96 | `cross_post_exact_duplicate` |
 | 0b: Near-dup on different post | Levenshtein < 0.20 | 0.88 | `cross_post_near_duplicate` |
 
+**Step 0b performance cap:** Levenshtein comparisons are skipped for authors with **>50** cross-post comments. High-volume authors are already handled by SUSPICIOUS_AGENTS, seed templates, and Step 0a exact hash. A length pre-check (>25% length difference → skip) further reduces unnecessary comparisons.
+
 ### Step 1: Exact Duplicate (within same post)
 
 SHA-256 of normalized text. Confidence: **0.98**. Signal: `exact_duplicate`.
@@ -270,6 +272,8 @@ These domains are never counted as "external" for self-promo detection:
 |-----------|-------|---------|
 | Near-dup (same post) | < 0.15 | Step 3 |
 | Near-dup (cross-post) | < 0.20 | Step 0b |
+| Cross-post Levenshtein author cap | 50 comments | Step 0b |
+| Cross-post length pre-check | > 25% diff → skip | Step 0b |
 | Template match (normal) | < 0.15 | Step 4 |
 | Template match (suspicious) | < 0.25 | Step 4 |
 | Quote-inject template | < 0.20 | Step 4.5 |
