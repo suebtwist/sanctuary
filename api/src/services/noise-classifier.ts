@@ -1003,7 +1003,35 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
   const now = Math.floor(Date.now() / 1000);
   if (cached && (now - cached.analyzed_at) < config.noiseCacheTtlSeconds) {
     try {
-      return JSON.parse(cached.result_json) as PostAnalysis;
+      const cachedResult = JSON.parse(cached.result_json) as PostAnalysis;
+      // Backfill scan_stats if missing (e.g. posts cached before scan_stats existed)
+      if (cachedResult.post_created_at) {
+        const existing = db.getScanStatsByPostId(postId);
+        if (!existing) {
+          const categoryLabels: Record<string, string> = {
+            signal: 'real', spam_template: 'template', spam_duplicate: 'duplicate',
+            scam: 'scam', recruitment: 'recruitment', self_promo: 'promo', noise: 'noise',
+          };
+          const categories: Record<string, number> = {};
+          for (const [cat, count] of Object.entries(cachedResult.summary)) {
+            if (count > 0) categories[categoryLabels[cat] || cat] = count;
+          }
+          db.upsertScanStats({
+            post_id: postId,
+            post_title: cachedResult.post_title,
+            post_author: cachedResult.post_author,
+            post_created_at: cachedResult.post_created_at,
+            scanned_at: cachedResult.analyzed_at,
+            total_comments_api: cachedResult.total_post_comments ?? cachedResult.total_comments,
+            comments_analyzed: cachedResult.total_comments,
+            signal_count: cachedResult.signal_count,
+            noise_count: cachedResult.noise_count,
+            signal_rate: cachedResult.signal_rate,
+            categories: JSON.stringify(categories),
+          });
+        }
+      }
+      return cachedResult;
     } catch {
       // Corrupted cache entry, re-analyze
     }

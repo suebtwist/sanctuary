@@ -717,6 +717,11 @@ CREATE INDEX IF NOT EXISTS idx_scan_stats_post_created_at ON scan_stats(post_cre
 
   // ============ Scan Stats ============
 
+  getScanStatsByPostId(postId: string): DbScanStats | undefined {
+    const stmt = this.db.prepare('SELECT * FROM scan_stats WHERE post_id = ?');
+    return stmt.get(postId) as DbScanStats | undefined;
+  }
+
   upsertScanStats(stats: DbScanStats): void {
     const stmt = this.db.prepare(`
       INSERT INTO scan_stats (post_id, post_title, post_author, post_created_at, scanned_at,
