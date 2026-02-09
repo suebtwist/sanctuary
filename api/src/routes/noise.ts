@@ -370,8 +370,8 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
       </div>
       <div class="sort-group">
         <span class="control-label">Sort</span>
-        <button class="sort-btn active" data-sort="classification" onclick="setSort('classification', this)">By type</button>
-        <button class="sort-btn" data-sort="confidence" onclick="setSort('confidence', this)">By confidence</button>
+        <button class="sort-btn" data-sort="classification" onclick="setSort('classification', this)">By type</button>
+        <button class="sort-btn active" data-sort="score" onclick="setSort('score', this)">By signal score</button>
         <button class="sort-btn" data-sort="original" onclick="setSort('original', this)">As posted</button>
       </div>
     </div>
@@ -493,10 +493,12 @@ function renderResults(data) {
   const list = document.getElementById('commentList');
   list.innerHTML = '';
   data.comments.forEach((c, i) => {
+    const score = getSignalScore(c);
+    const scoreColor = getScoreColor(score);
     const el = document.createElement('div');
     el.className = 'comment-item';
     el.setAttribute('data-cat', c.classification);
-    el.setAttribute('data-conf', String(c.confidence));
+    el.setAttribute('data-score', String(score));
     el.setAttribute('data-idx', String(i));
     el.innerHTML =
       '<div class="comment-badge dot-' + c.classification + '" style="min-width:10px;height:10px;border-radius:50%;margin-top:6px;background:var(--' + getCssVar(c.classification) + ')"></div>' +
@@ -505,14 +507,25 @@ function renderResults(data) {
         '<div class="comment-text">' + escapeHtml(c.text) + '</div>' +
         '<div class="comment-meta">' +
           '<span class="comment-tag tag-' + c.classification + '">' + c.classification.replace('_', ' ') + '</span>' +
-          '<span style="color:var(--text-muted);font-size:12px;">' + Math.round(c.confidence * 100) + '% confidence</span>' +
+          '<span style="color:' + scoreColor + ';font-size:12px;font-weight:600;">' + score + '% signal</span>' +
         '</div>' +
       '</div>';
     list.appendChild(el);
   });
 
-  // Apply default sort (by classification)
-  setSort('classification', document.querySelector('.sort-btn[data-sort="classification"]'));
+  // Apply default sort (by signal score, highest first)
+  setSort('score', document.querySelector('.sort-btn[data-sort="score"]'));
+}
+
+function getSignalScore(c) {
+  if (c.classification === 'signal') return Math.round(c.confidence * 100);
+  return Math.round((1 - c.confidence) * 100);
+}
+
+function getScoreColor(score) {
+  if (score >= 60) return 'var(--green)';
+  if (score >= 30) return 'var(--yellow)';
+  return 'var(--red)';
 }
 
 function getCssVar(cat) {
@@ -532,7 +545,7 @@ const FILTER_GROUPS = {
   spam: ['spam_duplicate', 'recruitment', 'scam'],
 };
 let activeFilters = new Set(['all']);
-let activeSort = 'classification';
+let activeSort = 'score';
 
 function toggleFilter(filter, btn) {
   if (filter === 'all') {
@@ -583,8 +596,8 @@ function setSort(sort, btn) {
   items.sort((a, b) => {
     if (sort === 'classification') {
       return (SORT_ORDER[a.getAttribute('data-cat')] ?? 9) - (SORT_ORDER[b.getAttribute('data-cat')] ?? 9);
-    } else if (sort === 'confidence') {
-      return parseFloat(b.getAttribute('data-conf')) - parseFloat(a.getAttribute('data-conf'));
+    } else if (sort === 'score') {
+      return parseInt(b.getAttribute('data-score')) - parseInt(a.getAttribute('data-score'));
     }
     return parseInt(a.getAttribute('data-idx')) - parseInt(b.getAttribute('data-idx'));
   });

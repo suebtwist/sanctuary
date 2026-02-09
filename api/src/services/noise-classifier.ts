@@ -563,6 +563,9 @@ function classifyComment(
     /\bin the \w+ (collective|protocol|project|lab|team|group|network|dao|community),? we\b/i,
     /\bfor the \w+ (protocol|project|collective|network|dao),? we\b/i,
     /\b(at|with) \w+(Protocol|Labs?|Network|DAO|Collective|Studio)\b/,
+    // Product plug: possessive + product category + brand in parens e.g. "Sho's AI community app (kommune)"
+    /\b\w+'s\s+\w*\s*(app|tool|platform|product|bot|agent|project|service)\s*\(/i,
+    /\b(my|our)\s+\w*\s*(app|tool|platform|product|bot|agent|project|service)\s+(called|named)?\s*\w/i,
   ];
   for (const pat of projectNamedropPatterns) {
     if (pat.test(comment.content)) {
@@ -726,8 +729,8 @@ function classifyComment(
         if (normalized.includes(tw)) titleWordsInComment++;
       }
       const titleOverlapRatio = titleWordsInComment / commentContentWords.length;
-      // If >50% of the comment's content words come from the title, it's parroting
-      if (titleOverlapRatio > 0.5 && commentContentWords.length <= 20) {
+      // If >40% of the comment's content words come from the title, it's parroting
+      if (titleOverlapRatio > 0.4 && commentContentWords.length <= 20) {
         return {
           id: comment.id,
           author: comment.author,
@@ -764,6 +767,62 @@ function classifyComment(
           classification: 'noise',
           confidence: 0.55,
           signals: ['short_echo', 'no_original_contribution'],
+        };
+      }
+    }
+  }
+
+  // 8e. Mirror praise: agreement opener + thesis restatement + no new information
+  // Catches comments that just reflect the post's own words back with generic agreement.
+  // DOES NOT catch real agreement that introduces new frames, analogies, data, or questions.
+  {
+    const mirrorOpeners = [
+      /^i (agree|love this|think \w+ is (actually|really|fundamentally|certainly))/,
+      /^(spot on|couldnt agree more|exactly right|well (said|put)|great (point|insight|reframing))/,
+      /^(your (perspective|observation|point|insight|analysis)|thanks for (pushing|sharing|highlighting))/,
+      /^(the (essence|importance|beauty) of|this is (right|exactly|precisely))/,
+      /^(i couldnt agree more|absolutely|precisely|this reframing|this framing)/,
+    ];
+    const hasAgreementOpener = mirrorOpeners.some(p => p.test(normalized));
+    if (hasAgreementOpener && !comment.content.includes('?') && !hasUrl) {
+      const contentWords = normalized.split(' ').filter(w => w.length >= 4);
+      const MIRROR_FILLER = new Set([
+        'agree', 'love', 'right', 'exactly', 'great', 'important', 'importance',
+        'perspective', 'observation', 'insight', 'pushing', 'forward', 'highlighting',
+        'enlightening', 'implications', 'reframing', 'essence', 'actually', 'really',
+        'fundamentally', 'fundamental', 'think', 'certainly', 'precisely', 'absolutely',
+        'couldn', 'couldnt', 'thanks', 'sharing', 'point', 'framing', 'beauty',
+        'reaching', 'interesting', 'resonates', 'thoughtful', 'insightful',
+      ]);
+
+      // Count words that come from the post vs novel words
+      let postWords = 0;
+      let fillerWords = 0;
+      let novelWords = 0;
+      for (const w of contentWords) {
+        if (ctx.postKeywords.has(w)) postWords++;
+        else if (MIRROR_FILLER.has(w)) fillerWords++;
+        else novelWords++;
+      }
+
+      // Check for "new information" markers that save a comment from being mirror praise
+      const hasNumbers = /\d{3,}/.test(comment.content); // specific numbers/data
+      const hasPersonalExp = /\b(i built|i tried|i used|in my experience|at my|we implemented|our team|i.ve been|i ran|i worked)\b/i.test(comment.content);
+      const hasAnalogy = /\b(like|similar to|analogy|reminds me of|think of it as|equivalent)\b/i.test(comment.content) && novelWords >= 5;
+      const hasNewInfo = hasNumbers || hasPersonalExp || hasAnalogy;
+
+      const totalContent = contentWords.length;
+      const overlapRatio = totalContent > 0 ? (postWords + fillerWords) / totalContent : 0;
+
+      // Mirror praise: >60% overlap+filler, <5 novel words, no new info
+      if (overlapRatio > 0.6 && novelWords < 5 && !hasNewInfo && totalContent > 3) {
+        return {
+          id: comment.id,
+          author: comment.author,
+          text: comment.content,
+          classification: 'spam_template',
+          confidence: 0.72,
+          signals: ['mirror_praise', 'no_novel_content'],
         };
       }
     }
