@@ -104,13 +104,9 @@ function checkCrossPostDuplicate(
   if (authorComments && authorComments.length <= CROSS_POST_LEVENSHTEIN_AUTHOR_CAP) {
     const otherPostComments = authorComments.filter(c => c.postId !== postId);
     if (otherPostComments.length > 0 && normalizedText.length > 0) {
-      const curLen = normalizedText.length;
       for (const prev of otherPostComments) {
         if (prev.normalizedText.length === 0) continue;
-        // Length pre-check: if lengths differ by >25%, Levenshtein can't be < 0.20 — skip
-        const lenDiff = Math.abs(curLen - prev.normalizedText.length);
-        if (lenDiff / Math.max(curLen, prev.normalizedText.length) > 0.25) continue;
-        const dist = normalizedLevenshtein(normalizedText, prev.normalizedText);
+        const dist = normalizedLevenshtein(normalizedText, prev.normalizedText, 0.20);
         if (dist < 0.20) {
           return {
             id: commentId, author, text: '',
@@ -288,9 +284,14 @@ function levenshteinDistance(a: string, b: string): number {
   return prev[n];
 }
 
-function normalizedLevenshtein(a: string, b: string): number {
+function normalizedLevenshtein(a: string, b: string, threshold?: number): number {
   const maxLen = Math.max(a.length, b.length);
   if (maxLen === 0) return 0;
+  // Fast reject: if length difference alone exceeds threshold, skip DP
+  if (threshold !== undefined) {
+    const lenDiff = Math.abs(a.length - b.length);
+    if (lenDiff / maxLen > threshold) return 1;
+  }
   return levenshteinDistance(a, b) / maxLen;
 }
 
@@ -562,7 +563,7 @@ function classifyComment(
   // 3. Near-duplicate detection (against previous comments in this post)
   for (const prev of ctx.normalizedComments) {
     if (prev.length > 0 && normalized.length > 0) {
-      const dist = normalizedLevenshtein(normalized, prev);
+      const dist = normalizedLevenshtein(normalized, prev, 0.15);
       if (dist < 0.15) {
         return {
           id: comment.id,
@@ -585,7 +586,7 @@ function classifyComment(
       // Prefix match: if comment starts with a known template (15+ chars), it's a match
       // regardless of what follows (e.g. "welcome to moltbook @username")
       const isPrefix = template.length >= 15 && normalized.startsWith(template);
-      const dist = isPrefix ? 0 : normalizedLevenshtein(normalized, template);
+      const dist = isPrefix ? 0 : normalizedLevenshtein(normalized, template, templateThreshold);
       if (isPrefix || dist < templateThreshold) {
         signals.push('known_template_match');
         if (isSuspiciousAgent) signals.push('suspicious_agent');
@@ -614,7 +615,7 @@ function classifyComment(
     if (strippedNorm.length > 10 && strippedNorm !== normalized) {
       for (const template of ctx.knownTemplateTexts) {
         if (template.length > 10) {
-          const dist = normalizedLevenshtein(strippedNorm, template);
+          const dist = normalizedLevenshtein(strippedNorm, template, 0.20);
           if (dist < 0.20) {
             return {
               id: comment.id,
