@@ -85,15 +85,22 @@ export async function fetchMoltbookPost(postId: string): Promise<MoltbookPost | 
   if (!response || !response.ok) return null;
 
   const text = await response.text();
-  const data = safeJsonParse<any>(text);
-  if (!data) return null;
+  const raw = safeJsonParse<any>(text);
+  if (!raw) return null;
+
+  // Unwrap common API response wrappers: { data: {...} }, { post: {...} }
+  const data = raw.data ?? raw.post ?? raw;
 
   // Defensive extraction — the API shape may vary
+  const title = data.title ?? '';
+  const content = data.content ?? data.body ?? '';
+  const author = data.author?.name ?? data.author_name ?? (typeof data.author === 'string' ? data.author : '');
+
   return {
     id: data.id ?? postId,
-    title: data.title ?? '',
-    content: data.content ?? data.body ?? '',
-    author: data.author?.name ?? data.author_name ?? data.author ?? '',
+    title,
+    content,
+    author,
     created_at: data.created_at ?? '',
   };
 }

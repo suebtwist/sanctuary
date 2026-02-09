@@ -1000,10 +1000,15 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
   const signalCount = summary.signal;
   const totalComments = classifications.length;
 
+  // Title fallback: if empty, use first ~80 chars of content
+  const displayTitle = post.title || (
+    post.content.length > 80 ? post.content.slice(0, 80) + '...' : post.content
+  ) || 'Untitled Post';
+
   const analysis: PostAnalysis = {
     post_id: postId,
-    post_title: post.title,
-    post_author: post.author,
+    post_title: displayTitle,
+    post_author: post.author || 'unknown',
     analyzed_at: new Date().toISOString(),
     total_comments: totalComments,
     signal_count: signalCount,
