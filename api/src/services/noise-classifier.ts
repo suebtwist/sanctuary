@@ -45,6 +45,7 @@ export interface PostAnalysis {
   analyzed_at: string;
   total_comments: number;         // comments actually analyzed
   total_post_comments: number;    // total on the post (may be higher if sampled)
+  reply_count: number;            // comments with a parent_id (nested replies)
   signal_count: number;
   noise_count: number;
   signal_rate: number;
@@ -1020,6 +1021,7 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
 
   // Total comment count comes from post metadata (API caps comments at ~100)
   const totalPostComments = Math.max(post.comment_count, comments.length);
+  const replyCount = comments.filter(c => c.parent_id).length;
 
   // Load known templates from DB
   const knownTemplates = db.getAllKnownTemplates();
@@ -1176,6 +1178,7 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
     analyzed_at: new Date().toISOString(),
     total_comments: totalComments,
     total_post_comments: totalPostComments,
+    reply_count: replyCount,
     signal_count: signalCount,
     noise_count: totalComments - signalCount,
     signal_rate: totalComments > 0 ? Math.round((signalCount / totalComments) * 100) / 100 : 0,

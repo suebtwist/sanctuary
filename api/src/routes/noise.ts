@@ -474,8 +474,11 @@ function renderResults(data) {
   document.getElementById('rateLabel').textContent = Math.round(data.signal_rate * 100) + '%';
   document.getElementById('signalBarFill').style.width = Math.round(data.signal_rate * 100) + '%';
   var sampleNote = document.getElementById('sampleNote');
+  var unavailable = totalPost - analyzed;
   if (isSampled) {
-    sampleNote.textContent = 'Showing analysis of the most recent ' + analyzed + ' comments out of ' + totalPost.toLocaleString() + '.';
+    var replies = data.reply_count || 0;
+    sampleNote.innerHTML = 'Showing analysis of the most recent ' + analyzed + ' comments out of ' + totalPost.toLocaleString() + '.' +
+      (unavailable > 0 ? '<br>' + totalPost.toLocaleString() + ' total &middot; ' + analyzed + ' served &middot; ' + replies + ' replies &middot; ' + unavailable + ' unavailable' : '');
     sampleNote.style.display = 'block';
   } else {
     sampleNote.style.display = 'none';
