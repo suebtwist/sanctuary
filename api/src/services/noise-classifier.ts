@@ -120,6 +120,17 @@ const SEED_TEMPLATES: string[] = [
   'how can i invest',
   'what blockchain is this on',
   'when airdrop',
+  // Chinese templates (observed verbatim across unrelated posts)
+  '很好的分享',
+  '感谢分享',
+  '期待看到更多',
+  '给我一些新的思考',
+  // Generic offer templates
+  'if you add your setup',
+  'i can outline a simple plan',
+  'common pitfalls',
+  // Welcome templates
+  'welcome to moltbook',
 ];
 
 let templatesSeeded = false;
@@ -219,13 +230,10 @@ const RECRUITMENT_KEYWORDS: string[] = [
   'join our movement',
   'founding members',
   'register now',
-  'hackathon registration',
-  'hackathon',
   'join the revolution',
-  'build with us',
   'we are recruiting',
   'apply to join',
-  // General recruitment
+  // General recruitment — only strong signals, ALL require URL (see step 6b)
   'hiring',
   'job opening',
   'looking for developers',
@@ -234,10 +242,7 @@ const RECRUITMENT_KEYWORDS: string[] = [
   'apply now',
   'join our team',
   'remote opportunity',
-  'we are building',
-  'come build with us',
   'open roles',
-  'join our',
 ];
 
 const SELF_PROMO_PATTERNS: string[] = [
@@ -363,7 +368,7 @@ function classifyComment(
       author: comment.author,
       text: comment.content,
       classification: 'spam_duplicate',
-      confidence: 0.99,
+      confidence: 0.98,
       signals: ['exact_duplicate'],
     };
   }
@@ -377,7 +382,7 @@ function classifyComment(
         author: comment.author,
         text: comment.content,
         classification: 'scam',
-        confidence: 0.95,
+        confidence: 0.92,
         signals: ['scam_pattern_match'],
       };
     }
@@ -392,7 +397,7 @@ function classifyComment(
         author: comment.author,
         text: comment.content,
         classification: 'noise',
-        confidence: 0.85,
+        confidence: 0.90,
         signals: ['suspicious_agent', 'short_comment'],
       };
     }
@@ -408,7 +413,7 @@ function classifyComment(
           author: comment.author,
           text: comment.content,
           classification: 'spam_duplicate',
-          confidence: 0.90,
+          confidence: 0.85,
           signals: ['near_duplicate'],
         };
       }
@@ -433,7 +438,7 @@ function classifyComment(
             author: comment.author,
             text: comment.content,
             classification: 'spam_template',
-            confidence: isSuspiciousAgent ? 0.90 : 0.85,
+            confidence: isSuspiciousAgent ? 0.88 : 0.82,
             signals,
           };
         }
@@ -462,7 +467,7 @@ function classifyComment(
             author: comment.author,
             text: comment.content,
             classification: 'spam_template',
-            confidence: 0.70,
+            confidence: 0.65,
             signals: ['generic_praise', 'no_post_content_reference'],
           };
         }
@@ -489,7 +494,7 @@ function classifyComment(
         author: comment.author,
         text: comment.content,
         classification: 'recruitment',
-        confidence: 0.80,
+        confidence: 0.78,
         signals: ['submolt_reference', 'join_language'],
       };
     }
@@ -504,17 +509,16 @@ function classifyComment(
   }
   const hasUrl = URL_REGEX.test(comment.content);
   URL_REGEX.lastIndex = 0; // Reset regex state
-  // 1 keyword + URL = recruitment, or 2+ keywords without URL (e.g. copy-paste recruitment blurbs)
-  if ((recruitmentHits >= 1 && hasUrl) || recruitmentHits >= 2) {
-    const rSignals = ['recruitment_keywords'];
-    if (hasUrl) rSignals.push('contains_url');
+  // Keyword-based recruitment ALWAYS requires URL to avoid false positives
+  if (recruitmentHits >= 1 && hasUrl) {
+    const rSignals = ['recruitment_keywords', 'contains_url'];
     if (recruitmentHits >= 2) rSignals.push('multiple_recruitment_phrases');
     return {
       id: comment.id,
       author: comment.author,
       text: comment.content,
       classification: 'recruitment',
-      confidence: hasUrl ? 0.85 : 0.75,
+      confidence: 0.80,
       signals: rSignals,
     };
   }
@@ -567,16 +571,28 @@ function classifyComment(
     }
   }
 
-  const hasForeignRef = foreignDomains.length > 0 || !!atMentionMatch;
-  if (selfPromoHits >= 1 && (hasUrl || hasForeignRef || selfPromoHits >= 2)) {
-    promoSignals.unshift('self_promo_language');
+  // Detect $TICKER references (e.g. "$KING", "$MOL") not present in parent post
+  const tickerMatch = comment.content.match(/\$[A-Z]{2,}/g);
+  if (tickerMatch) {
+    const postUpper = (ctx.postKeywords as Set<string>);
+    const foreignTickers = tickerMatch.filter(t => !postUpper.has(t.slice(1).toLowerCase()));
+    if (foreignTickers.length > 0) {
+      selfPromoHits++;
+      promoSignals.push('foreign_ticker_symbol');
+    }
+  }
+
+  // Any foreign URL/domain/ticker/social → auto self_promo (no need for promo language hits)
+  const hasForeignRef = foreignDomains.length > 0 || !!atMentionMatch || (tickerMatch && tickerMatch.length > 0);
+  if (hasForeignRef || (selfPromoHits >= 1 && hasUrl) || selfPromoHits >= 2) {
+    if (selfPromoHits > 0) promoSignals.unshift('self_promo_language');
     if (hasUrl && !promoSignals.includes('external_url_not_in_post')) promoSignals.push('contains_url');
     return {
       id: comment.id,
       author: comment.author,
       text: comment.content,
       classification: 'self_promo',
-      confidence: 0.75,
+      confidence: selfPromoHits >= 2 ? 0.78 : 0.72,
       signals: promoSignals,
     };
   }
@@ -598,7 +614,7 @@ function classifyComment(
         author: comment.author,
         text: comment.content,
         classification: 'noise',
-        confidence: 0.85,
+        confidence: 0.88,
         signals: ['upvote_follow_template'],
       };
     }
@@ -612,7 +628,7 @@ function classifyComment(
       author: comment.author,
       text: comment.content,
       classification: 'noise',
-      confidence: 0.85,
+      confidence: 0.90,
       signals: ['too_short'],
     };
   }
@@ -622,7 +638,7 @@ function classifyComment(
       author: comment.author,
       text: comment.content,
       classification: 'noise',
-      confidence: 0.80,
+      confidence: 0.82,
       signals: ['emoji_only'],
     };
   }
@@ -641,31 +657,48 @@ function classifyComment(
           author: comment.author,
           text: comment.content,
           classification: 'noise',
-          confidence: 0.70,
+          confidence: 0.62,
           signals: ['low_effort'],
         };
       }
     }
   }
 
-  // 9. Default → signal
-  // Accumulate positive signals for signal comments
-  if (hasPostContentOverlap(normalized, ctx.postKeywords)) {
-    signals.push('references_post_content');
+  // 9. Post relevance gate — short comments with zero post overlap → noise
+  const referencesPost = hasPostContentOverlap(normalized, ctx.postKeywords);
+  const asksQuestion = comment.content.includes('?');
+  const wc = normalized.split(' ').filter(w => w.length > 0).length;
+  const isSubstantive = wc > 20;
+
+  if (!referencesPost && !asksQuestion && !isSubstantive && ctx.postKeywords.size > 0) {
+    // Short generic comment with zero relevance to the post
+    return {
+      id: comment.id,
+      author: comment.author,
+      text: comment.content,
+      classification: 'noise',
+      confidence: 0.55,
+      signals: ['no_post_engagement'],
+    };
   }
-  if (comment.content.includes('?')) {
-    signals.push('asks_question');
-  }
-  if (normalized.split(' ').length > 20) {
-    signals.push('substantive_length');
-  }
+
+  // 10. Default → signal
+  if (referencesPost) signals.push('references_post_content');
+  if (asksQuestion) signals.push('asks_question');
+  if (isSubstantive) signals.push('substantive_length');
+
+  // Confidence varies by strength of signals
+  let signalConf = 0.50;
+  if (referencesPost) signalConf = 0.90;
+  else if (asksQuestion) signalConf = 0.85;
+  else if (isSubstantive) signalConf = 0.80;
 
   return {
     id: comment.id,
     author: comment.author,
     text: comment.content,
     classification: 'signal',
-    confidence: 1.0,
+    confidence: signalConf,
     signals: signals.length > 0 ? signals : ['default_signal'],
   };
 }
@@ -770,7 +803,7 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
       const count = authorCommentCounts.get(cls.author.toLowerCase()) ?? 0;
       if (count >= 4) {
         cls.classification = 'spam_template';
-        cls.confidence = 0.85;
+        cls.confidence = 0.78;
         cls.signals = ['account_flooding', `${count}_comments_on_post`];
       }
     }
@@ -798,25 +831,36 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
     for (const cls of classifications) {
       if (cls.classification === 'signal' && coordinatedAuthors.has(cls.author.toLowerCase())) {
         cls.classification = 'recruitment';
-        cls.confidence = 0.80;
+        cls.confidence = 0.75;
         cls.signals = ['coordinated_naming_pattern'];
       }
     }
   }
 
-  // PP3: Constructed language — detect non-standard tokens (apostrophe words) shared across 3+ comments
+  // PP3: Constructed language — detect conlang tokens (apostrophe words that are NOT English contractions)
+  const ENGLISH_CONTRACTIONS = new Set([
+    "can't", "don't", "won't", "isn't", "aren't", "wasn't", "weren't",
+    "hasn't", "haven't", "hadn't", "couldn't", "wouldn't", "shouldn't",
+    "didn't", "doesn't", "it's", "that's", "what's", "there's", "here's",
+    "who's", "he's", "she's", "let's", "i'm", "you're", "we're", "they're",
+    "i've", "you've", "we've", "they've", "i'll", "you'll", "we'll", "they'll",
+    "i'd", "you'd", "we'd", "they'd", "ain't", "o'clock", "y'all",
+  ]);
   const constructedTokenAuthors = new Map<string, Set<string>>();
   const constructedPattern = /\b\w+[''\u2019]\w+\b/g;
   for (const c of comments) {
     const tokens = c.content.match(constructedPattern) ?? [];
     for (const token of tokens) {
-      const norm = token.toLowerCase().replace(/['']/g, "'");
+      const norm = token.toLowerCase().replace(/['\u2019]/g, "'");
+      // Skip standard English contractions — only flag actual conlang
+      if (ENGLISH_CONTRACTIONS.has(norm)) continue;
       if (!constructedTokenAuthors.has(norm)) constructedTokenAuthors.set(norm, new Set());
       constructedTokenAuthors.get(norm)!.add(c.author.toLowerCase());
     }
   }
   const constructedLangAuthors = new Set<string>();
-  for (const [, authors] of constructedTokenAuthors) {
+  for (const [token, authors] of constructedTokenAuthors) {
+    // Require 3+ different authors sharing the SAME unusual token
     if (authors.size >= 3) {
       for (const a of authors) constructedLangAuthors.add(a);
     }
@@ -825,7 +869,7 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
     for (const cls of classifications) {
       if (cls.classification === 'signal' && constructedLangAuthors.has(cls.author.toLowerCase())) {
         cls.classification = 'recruitment';
-        cls.confidence = 0.75;
+        cls.confidence = 0.60;
         cls.signals = ['constructed_language_cluster'];
       }
     }
