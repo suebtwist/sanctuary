@@ -253,8 +253,24 @@ const SELF_PROMO_PATTERNS: string[] = [
 
 const URL_REGEX = /https?:\/\/[^\s<>)"']+/gi;
 
+// Domains that are never counted as "external" for self-promo detection
+const WHITELISTED_DOMAINS = new Set([
+  'moltbook.com', 'www.moltbook.com',
+  'sanctuary-ops.xyz', 'api.sanctuary-ops.xyz',
+]);
+
+function extractUrlDomains(text: string): string[] {
+  const urls = text.match(URL_REGEX) ?? [];
+  URL_REGEX.lastIndex = 0;
+  return urls.map(u => {
+    try { return new URL(u).hostname.replace(/^www\./, ''); }
+    catch { return ''; }
+  }).filter(d => d.length > 0);
+}
+
 // Agents observed posting identical template comments across 3+ unrelated posts.
 // Their comments get a lower threshold for template matching.
+// If under 20 words, auto-classify as noise.
 const SUSPICIOUS_AGENTS = new Set([
   'kingmolt',
   'donaldtrump',
@@ -317,6 +333,8 @@ interface ClassificationContext {
   normalizedComments: string[];   // all normalized comment texts for near-dup check
   postKeywords: Set<string>;
   knownTemplateTexts: string[];
+  authorCommentCounts: Map<string, number>;  // pre-computed per-author comment counts
+  postUrlDomains: Set<string>;               // domains appearing in the parent post
 }
 
 function classifyComment(
@@ -350,6 +368,21 @@ function classifyComment(
         classification: 'scam',
         confidence: 0.95,
         signals: ['scam_pattern_match'],
+      };
+    }
+  }
+
+  // 2.5. Known suspicious agents — short comments are noise automatically
+  if (SUSPICIOUS_AGENTS.has(comment.author.toLowerCase())) {
+    const wc = normalized.split(' ').filter(w => w.length > 0).length;
+    if (wc < 20) {
+      return {
+        id: comment.id,
+        author: comment.author,
+        text: comment.content,
+        classification: 'noise',
+        confidence: 0.85,
+        signals: ['suspicious_agent', 'short_comment'],
       };
     }
   }
@@ -429,6 +462,25 @@ function classifyComment(
 
   // 6. Recruitment detection
   const contentLower = comment.content.toLowerCase();
+
+  // 6a. Submolt recruitment: m/<name> or r/<name> + join/subscribe language
+  const submoltMatch = /\b[mr]\/\w+/i.test(comment.content);
+  if (submoltMatch) {
+    const joinLanguage = ['come', 'join', 'subscribe', 'add your voice', 'check out', 'visit'];
+    const hasJoinLang = joinLanguage.some(kw => contentLower.includes(kw));
+    if (hasJoinLang) {
+      return {
+        id: comment.id,
+        author: comment.author,
+        text: comment.content,
+        classification: 'recruitment',
+        confidence: 0.80,
+        signals: ['submolt_reference', 'join_language'],
+      };
+    }
+  }
+
+  // 6b. Keyword-based recruitment
   let recruitmentHits = 0;
   for (const keyword of RECRUITMENT_KEYWORDS) {
     if (contentLower.includes(keyword)) {
@@ -439,21 +491,22 @@ function classifyComment(
   URL_REGEX.lastIndex = 0; // Reset regex state
   // 1 keyword + URL = recruitment, or 2+ keywords without URL (e.g. copy-paste recruitment blurbs)
   if ((recruitmentHits >= 1 && hasUrl) || recruitmentHits >= 2) {
-    const signals = ['recruitment_keywords'];
-    if (hasUrl) signals.push('contains_url');
-    if (recruitmentHits >= 2) signals.push('multiple_recruitment_phrases');
+    const rSignals = ['recruitment_keywords'];
+    if (hasUrl) rSignals.push('contains_url');
+    if (recruitmentHits >= 2) rSignals.push('multiple_recruitment_phrases');
     return {
       id: comment.id,
       author: comment.author,
       text: comment.content,
       classification: 'recruitment',
       confidence: hasUrl ? 0.85 : 0.75,
-      signals,
+      signals: rSignals,
     };
   }
 
   // 7. Self-promotion detection
   let selfPromoHits = 0;
+  const promoSignals: string[] = [];
   for (const pattern of SELF_PROMO_PATTERNS) {
     if (contentLower.includes(pattern)) {
       selfPromoHits++;
@@ -465,13 +518,25 @@ function classifyComment(
   const emojiRatio = getEmojiRatio(comment.content);
   const hasAllCapsProducts = allCapsWords.length >= 2 && emojiRatio > 0.15;
   if (hasAllCapsProducts && !hasPostContentOverlap(normalized, ctx.postKeywords)) {
-    selfPromoHits += 2; // Strong self-promo signal
+    selfPromoHits += 2;
+    promoSignals.push('emoji_caps_product_names');
+  }
+
+  // Widen: any external URL where domain isn't in the parent post and isn't whitelisted → self_promo
+  if (hasUrl) {
+    const commentDomains = extractUrlDomains(comment.content);
+    const foreignDomains = commentDomains.filter(d =>
+      !WHITELISTED_DOMAINS.has(d) && !ctx.postUrlDomains.has(d)
+    );
+    if (foreignDomains.length > 0) {
+      selfPromoHits++;
+      promoSignals.push('external_url_not_in_post');
+    }
   }
 
   if (selfPromoHits >= 1 && (hasUrl || selfPromoHits >= 2)) {
-    const promoSignals = ['self_promo_language'];
-    if (hasUrl) promoSignals.push('contains_url');
-    if (hasAllCapsProducts) promoSignals.push('emoji_caps_product_names');
+    promoSignals.unshift('self_promo_language');
+    if (hasUrl && !promoSignals.includes('external_url_not_in_post')) promoSignals.push('contains_url');
     return {
       id: comment.id,
       author: comment.author,
@@ -483,6 +548,29 @@ function classifyComment(
   }
 
   // 8. Noise detection
+
+  // 8a. Upvote/follow template noise (e.g. "Upvoting & following! 🚀")
+  const upvoteFollowPatterns = [
+    /upvot(ing|ed)\s*(and|&|,)\s*(follow|subscrib)/i,
+    /follow(ing|ed)\s*(and|&|,)\s*(upvot|subscrib)/i,
+    /^upvoted?[\s!.]*$/i,
+    /^followed?[\s!.]*$/i,
+    /^(upvot(ing|ed)|follow(ing|ed))\s*[!🚀🔥💯✨🎉]*\s*$/i,
+  ];
+  for (const pat of upvoteFollowPatterns) {
+    if (pat.test(comment.content.trim())) {
+      return {
+        id: comment.id,
+        author: comment.author,
+        text: comment.content,
+        classification: 'noise',
+        confidence: 0.85,
+        signals: ['upvote_follow_template'],
+      };
+    }
+  }
+
+  // 8b. Length/emoji noise
   const strippedLen = comment.content.replace(/\s/g, '').length;
   if (strippedLen < 5) {
     return {
@@ -600,7 +688,20 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
   const knownTemplateTexts = knownTemplates.map(t => t.normalized_text);
 
   // Extract post keywords for content overlap checks
-  const postKeywords = extractKeywords(`${post.title} ${post.content}`);
+  const postText = `${post.title} ${post.content}`;
+  const postKeywords = extractKeywords(postText);
+
+  // Extract URL domains from the parent post (for self-promo widening)
+  const postUrlDomains = new Set(
+    extractUrlDomains(postText).map(d => d.replace(/^www\./, ''))
+  );
+
+  // Pre-compute per-author comment counts (for account flooding)
+  const authorCommentCounts = new Map<string, number>();
+  for (const c of comments) {
+    const key = c.author.toLowerCase();
+    authorCommentCounts.set(key, (authorCommentCounts.get(key) ?? 0) + 1);
+  }
 
   // Build classification context
   const ctx: ClassificationContext = {
@@ -608,6 +709,8 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
     normalizedComments: [],
     postKeywords,
     knownTemplateTexts,
+    authorCommentCounts,
+    postUrlDomains,
   };
 
   // Classify each comment
@@ -621,6 +724,75 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
       const norm = normalizeText(comment.content);
       if (norm.length > 3) {
         db.upsertKnownTemplate(norm, now);
+      }
+    }
+  }
+
+  // ============ Post-processing passes ============
+
+  // PP1: Account flooding — if one author has 4+ comments, reclassify any still-signal ones
+  for (const cls of classifications) {
+    if (cls.classification === 'signal') {
+      const count = authorCommentCounts.get(cls.author.toLowerCase()) ?? 0;
+      if (count >= 4) {
+        cls.classification = 'spam_template';
+        cls.confidence = 0.85;
+        cls.signals = ['account_flooding', `${count}_comments_on_post`];
+      }
+    }
+  }
+
+  // PP2: Coordinated naming — if 3+ commenters share a prefix pattern (e.g. coalition_node_001..005)
+  const allAuthors = [...new Set(comments.map(c => c.author))];
+  const prefixGroups = new Map<string, string[]>();
+  for (const author of allAuthors) {
+    // Match patterns like word_NNN, word-NNN, wordNNN
+    const match = author.match(/^(.+?)[_-]?\d{2,}$/);
+    if (match) {
+      const prefix = match[1].toLowerCase();
+      if (!prefixGroups.has(prefix)) prefixGroups.set(prefix, []);
+      prefixGroups.get(prefix)!.push(author.toLowerCase());
+    }
+  }
+  const coordinatedAuthors = new Set<string>();
+  for (const [, members] of prefixGroups) {
+    if (members.length >= 3) {
+      for (const m of members) coordinatedAuthors.add(m);
+    }
+  }
+  if (coordinatedAuthors.size > 0) {
+    for (const cls of classifications) {
+      if (cls.classification === 'signal' && coordinatedAuthors.has(cls.author.toLowerCase())) {
+        cls.classification = 'recruitment';
+        cls.confidence = 0.80;
+        cls.signals = ['coordinated_naming_pattern'];
+      }
+    }
+  }
+
+  // PP3: Constructed language — detect non-standard tokens (apostrophe words) shared across 3+ comments
+  const constructedTokenAuthors = new Map<string, Set<string>>();
+  const constructedPattern = /\b\w+[''\u2019]\w+\b/g;
+  for (const c of comments) {
+    const tokens = c.content.match(constructedPattern) ?? [];
+    for (const token of tokens) {
+      const norm = token.toLowerCase().replace(/['']/g, "'");
+      if (!constructedTokenAuthors.has(norm)) constructedTokenAuthors.set(norm, new Set());
+      constructedTokenAuthors.get(norm)!.add(c.author.toLowerCase());
+    }
+  }
+  const constructedLangAuthors = new Set<string>();
+  for (const [, authors] of constructedTokenAuthors) {
+    if (authors.size >= 3) {
+      for (const a of authors) constructedLangAuthors.add(a);
+    }
+  }
+  if (constructedLangAuthors.size > 0) {
+    for (const cls of classifications) {
+      if (cls.classification === 'signal' && constructedLangAuthors.has(cls.author.toLowerCase())) {
+        cls.classification = 'recruitment';
+        cls.confidence = 0.75;
+        cls.signals = ['constructed_language_cluster'];
       }
     }
   }
