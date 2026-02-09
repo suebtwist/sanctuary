@@ -146,7 +146,7 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
    * Signal rate vs post age benchmark. Cached for 5 minutes.
    */
   fastify.get('/benchmark', async (_request, reply) => {
-    reply.header('Cache-Control', 'public, max-age=300');
+    reply.header('Cache-Control', 'no-cache');
 
     const db = getDb();
     const rows = db.getAllScanStats();
@@ -768,7 +768,6 @@ function copyShare() {
 }
 
 // ============ Benchmark ============
-let benchmarkCache = null;
 let benchmarkOpen = false;
 
 function toggleBenchmark() {
@@ -793,13 +792,10 @@ async function loadBenchmark(postData) {
   if (!postData.post_created_at) return;
 
   try {
-    if (!benchmarkCache) {
-      var resp = await fetch(API_BASE + '/noise/benchmark');
-      var json = await resp.json();
-      if (json.insufficient_data) return;
-      benchmarkCache = json;
-    }
-    var bm = benchmarkCache;
+    var resp = await fetch(API_BASE + '/noise/benchmark');
+    var json = await resp.json();
+    if (json.insufficient_data) return;
+    var bm = json;
     if (!bm.buckets || bm.buckets.length === 0) return;
 
     document.getElementById('benchmarkLabel').textContent =
