@@ -238,22 +238,50 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   .dot-scam { background: var(--yellow); }
   .dot-recruitment, .dot-self_promo { background: var(--orange); }
   .dot-noise { background: var(--gray); }
-  .filters {
-    display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap;
+  .controls {
+    display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap;
+    align-items: center; justify-content: space-between;
+  }
+  .filter-group, .sort-group {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  }
+  .control-label {
+    font-size: 12px; color: var(--text-muted); text-transform: uppercase;
+    letter-spacing: 0.5px; margin-right: 4px;
   }
   .filter-btn {
-    padding: 6px 14px; border-radius: 16px; border: 1px solid var(--border);
-    background: transparent; color: var(--text-muted); font-size: 13px;
-    cursor: pointer;
+    padding: 5px 12px; border-radius: 14px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-muted); font-size: 12px;
+    cursor: pointer; transition: all 0.15s;
   }
-  .filter-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .filter-btn:hover { border-color: var(--text-muted); }
+  .filter-btn.active { color: white; }
+  .filter-btn.active[data-filter="signal"] { background: var(--green); border-color: var(--green); }
+  .filter-btn.active[data-filter="suspicious"] { background: var(--orange); border-color: var(--orange); }
+  .filter-btn.active[data-filter="spam"] { background: var(--red); border-color: var(--red); }
+  .filter-btn.active[data-filter="all"] { background: var(--accent); border-color: var(--accent); }
+  .sort-btn {
+    padding: 5px 12px; border-radius: 14px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-muted); font-size: 12px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .sort-btn:hover { border-color: var(--text-muted); }
+  .sort-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
   .comment-list { display: flex; flex-direction: column; gap: 8px; }
   .comment-item {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; padding: 14px 16px;
+    background: var(--surface); border-radius: 8px; padding: 14px 16px;
     display: flex; gap: 12px; align-items: flex-start;
+    border-left: 3px solid var(--border); border-top: 1px solid var(--border);
+    border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
   }
   .comment-item.hidden { display: none; }
+  .comment-item[data-cat="signal"] { border-left-color: var(--green); }
+  .comment-item[data-cat="spam_template"],
+  .comment-item[data-cat="noise"],
+  .comment-item[data-cat="self_promo"] { border-left-color: var(--orange); }
+  .comment-item[data-cat="spam_duplicate"],
+  .comment-item[data-cat="recruitment"],
+  .comment-item[data-cat="scam"] { border-left-color: var(--red); }
   .comment-badge {
     min-width: 10px; height: 10px; border-radius: 50%; margin-top: 6px;
   }
@@ -332,10 +360,20 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
       <div class="breakdown" id="breakdown"></div>
     </div>
 
-    <div class="filters">
-      <button class="filter-btn active" data-filter="all" onclick="setFilter('all', this)">Show all</button>
-      <button class="filter-btn" data-filter="signal" onclick="setFilter('signal', this)">Signal only</button>
-      <button class="filter-btn" data-filter="hide-spam" onclick="setFilter('hide-spam', this)">Hide spam</button>
+    <div class="controls">
+      <div class="filter-group">
+        <span class="control-label">Filter</span>
+        <button class="filter-btn active" data-filter="all" onclick="toggleFilter('all', this)">All</button>
+        <button class="filter-btn" data-filter="signal" onclick="toggleFilter('signal', this)">Signal</button>
+        <button class="filter-btn" data-filter="suspicious" onclick="toggleFilter('suspicious', this)">Suspicious</button>
+        <button class="filter-btn" data-filter="spam" onclick="toggleFilter('spam', this)">Spam</button>
+      </div>
+      <div class="sort-group">
+        <span class="control-label">Sort</span>
+        <button class="sort-btn active" data-sort="classification" onclick="setSort('classification', this)">By type</button>
+        <button class="sort-btn" data-sort="confidence" onclick="setSort('confidence', this)">By confidence</button>
+        <button class="sort-btn" data-sort="original" onclick="setSort('original', this)">As posted</button>
+      </div>
     </div>
 
     <div class="comment-list" id="commentList"></div>
@@ -454,10 +492,12 @@ function renderResults(data) {
   // Comments
   const list = document.getElementById('commentList');
   list.innerHTML = '';
-  for (const c of data.comments) {
+  data.comments.forEach((c, i) => {
     const el = document.createElement('div');
     el.className = 'comment-item';
     el.setAttribute('data-cat', c.classification);
+    el.setAttribute('data-conf', String(c.confidence));
+    el.setAttribute('data-idx', String(i));
     el.innerHTML =
       '<div class="comment-badge dot-' + c.classification + '" style="min-width:10px;height:10px;border-radius:50%;margin-top:6px;background:var(--' + getCssVar(c.classification) + ')"></div>' +
       '<div class="comment-body">' +
@@ -469,7 +509,10 @@ function renderResults(data) {
         '</div>' +
       '</div>';
     list.appendChild(el);
-  }
+  });
+
+  // Apply default sort (by classification)
+  setSort('classification', document.querySelector('.sort-btn[data-sort="classification"]'));
 }
 
 function getCssVar(cat) {
@@ -483,21 +526,69 @@ function escapeHtml(str) {
   return d.innerHTML;
 }
 
-function setFilter(filter, btn) {
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+const FILTER_GROUPS = {
+  signal: ['signal'],
+  suspicious: ['spam_template', 'noise', 'self_promo'],
+  spam: ['spam_duplicate', 'recruitment', 'scam'],
+};
+let activeFilters = new Set(['all']);
+let activeSort = 'classification';
 
-  const spamCats = ['spam_template', 'spam_duplicate', 'scam', 'recruitment'];
-  document.querySelectorAll('.comment-item').forEach(el => {
-    const cat = el.getAttribute('data-cat');
-    if (filter === 'all') {
-      el.classList.remove('hidden');
-    } else if (filter === 'signal') {
-      el.classList.toggle('hidden', cat !== 'signal');
-    } else if (filter === 'hide-spam') {
-      el.classList.toggle('hidden', spamCats.includes(cat));
+function toggleFilter(filter, btn) {
+  if (filter === 'all') {
+    activeFilters = new Set(['all']);
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  } else {
+    activeFilters.delete('all');
+    document.querySelector('.filter-btn[data-filter="all"]').classList.remove('active');
+    if (activeFilters.has(filter)) {
+      activeFilters.delete(filter);
+      btn.classList.remove('active');
+    } else {
+      activeFilters.add(filter);
+      btn.classList.add('active');
     }
+    if (activeFilters.size === 0) {
+      activeFilters.add('all');
+      document.querySelector('.filter-btn[data-filter="all"]').classList.add('active');
+    }
+  }
+  applyFilters();
+}
+
+function applyFilters() {
+  const visibleCats = new Set();
+  if (activeFilters.has('all')) {
+    Object.values(FILTER_GROUPS).flat().forEach(c => visibleCats.add(c));
+  } else {
+    for (const f of activeFilters) {
+      (FILTER_GROUPS[f] || []).forEach(c => visibleCats.add(c));
+    }
+  }
+  document.querySelectorAll('.comment-item').forEach(el => {
+    el.classList.toggle('hidden', !visibleCats.has(el.getAttribute('data-cat')));
   });
+}
+
+const SORT_ORDER = { signal: 0, spam_template: 1, noise: 1, self_promo: 1, spam_duplicate: 2, recruitment: 2, scam: 2 };
+
+function setSort(sort, btn) {
+  activeSort = sort;
+  document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (!currentData) return;
+  const list = document.getElementById('commentList');
+  const items = [...list.children];
+  items.sort((a, b) => {
+    if (sort === 'classification') {
+      return (SORT_ORDER[a.getAttribute('data-cat')] ?? 9) - (SORT_ORDER[b.getAttribute('data-cat')] ?? 9);
+    } else if (sort === 'confidence') {
+      return parseFloat(b.getAttribute('data-conf')) - parseFloat(a.getAttribute('data-conf'));
+    }
+    return parseInt(a.getAttribute('data-idx')) - parseInt(b.getAttribute('data-idx'));
+  });
+  items.forEach(el => list.appendChild(el));
 }
 
 async function loadStats() {

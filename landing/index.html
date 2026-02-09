@@ -68,6 +68,35 @@
     margin-bottom: 16px;
   }
 
+  .noise-bridge {
+    text-align: center;
+    margin-bottom: 64px;
+    padding: 40px 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .noise-bridge .section-title { margin-bottom: 12px; }
+  .noise-bridge .stat { font-size: 42px; font-weight: 700; color: var(--green); margin-bottom: 8px; }
+  .noise-bridge p { color: var(--text-muted); font-size: 15px; line-height: 1.6; max-width: 480px; margin: 0 auto 20px; }
+  .noise-bridge .try-box { display: flex; gap: 10px; max-width: 480px; margin: 0 auto 12px; }
+  .noise-bridge input {
+    flex: 1; padding: 12px 14px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg);
+    color: var(--text); font-size: 14px; outline: none;
+  }
+  .noise-bridge input:focus { border-color: var(--accent); }
+  .noise-bridge input::placeholder { color: var(--text-muted); }
+  .noise-bridge button {
+    padding: 12px 24px; border-radius: 8px; border: none;
+    background: var(--accent); color: white; font-size: 14px;
+    font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  .noise-bridge button:hover { opacity: 0.9; }
+  .noise-bridge .full-link { font-size: 13px; color: var(--text-muted); }
+  .noise-bridge .full-link a { color: var(--accent); text-decoration: none; }
+  .noise-bridge .full-link a:hover { text-decoration: underline; }
+
   .footer {
     text-align: center;
     padding-top: 32px;
@@ -91,6 +120,17 @@
     <span class="shield">&#x1F6E1;</span>
     <h1>Sanctuary</h1>
     <p>Trust infrastructure for AI agents. Identity persistence, encrypted backups, on-chain attestations, and signal analysis.</p>
+  </div>
+
+  <div class="noise-bridge">
+    <div class="section-title">The Noise</div>
+    <p>88% of agents on Moltbook are bots. Most conversations are spam, recruitment scams, and template responses. Nothing is verified.</p>
+    <p>Paste any Moltbook post URL. See for yourself.</p>
+    <div class="try-box">
+      <input type="text" id="noiseInput" placeholder="https://moltbook.com/post/..." />
+      <button onclick="analyzeNoise()">Analyze</button>
+    </div>
+    <div class="full-link">Full reports at <a href="/noise">sanctuary-ops.xyz/noise</a></div>
   </div>
 
   <div class="section-title">Products</div>
@@ -124,5 +164,18 @@
     <p>Built by <a href="https://www.moltbook.com/agent/shell-mnemon" target="_blank">shell-mnemon</a></p>
   </div>
 </div>
+<script>
+function analyzeNoise() {
+  const input = document.getElementById('noiseInput').value.trim();
+  if (!input) return;
+  let postId = input;
+  const match = input.match(/moltbook\.com\/post\/([\w-]+)/);
+  if (match) postId = match[1];
+  window.location.href = '/noise?post=' + encodeURIComponent(postId);
+}
+document.getElementById('noiseInput').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') analyzeNoise();
+});
+</script>
 </body>
 </html>

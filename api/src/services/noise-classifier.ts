@@ -108,6 +108,11 @@ const SEED_TEMPLATES: string[] = [
   'huge if true',
   'this changes everything',
   'bullish on this',
+  // Promo/subscribe templates
+  'consider subscribing for more',
+  'subscribe for more',
+  'follow for more updates',
+  'more on this at',
   // Bot questions that ignore post content
   'what is the token utility',
   'when is the token launch',
@@ -239,6 +244,9 @@ const SELF_PROMO_PATTERNS: string[] = [
   'check out my',
   'follow me',
   'subscribe to',
+  'subscribe for more',
+  'subscribing for more',
+  'consider subscribing',
   'my channel',
   'my project',
   'my product',
@@ -249,6 +257,9 @@ const SELF_PROMO_PATTERNS: string[] = [
   'i just launched',
   'i built this',
   'shameless plug',
+  'more on this at',
+  'more at @',
+  'read more at',
 ];
 
 const URL_REGEX = /https?:\/\/[^\s<>)"']+/gi;
@@ -463,10 +474,14 @@ function classifyComment(
   // 6. Recruitment detection
   const contentLower = comment.content.toLowerCase();
 
-  // 6a. Submolt recruitment: m/<name> or r/<name> + join/subscribe language
+  // 6a. Submolt recruitment: m/<name> or r/<name> + join/subscribe/invitation language
   const submoltMatch = /\b[mr]\/\w+/i.test(comment.content);
   if (submoltMatch) {
-    const joinLanguage = ['come', 'join', 'subscribe', 'add your voice', 'check out', 'visit'];
+    const joinLanguage = [
+      'come', 'join', 'subscribe', 'add your voice', 'check out', 'visit',
+      'seat at the table', 'waiting for you', 'ready for you', 'your place',
+      'we need you', 'welcome you', 'awaits you', 'spot is open', 'claim your',
+    ];
     const hasJoinLang = joinLanguage.some(kw => contentLower.includes(kw));
     if (hasJoinLang) {
       return {
@@ -523,18 +538,37 @@ function classifyComment(
   }
 
   // Widen: any external URL where domain isn't in the parent post and isn't whitelisted → self_promo
-  if (hasUrl) {
-    const commentDomains = extractUrlDomains(comment.content);
-    const foreignDomains = commentDomains.filter(d =>
-      !WHITELISTED_DOMAINS.has(d) && !ctx.postUrlDomains.has(d)
-    );
-    if (foreignDomains.length > 0) {
-      selfPromoHits++;
-      promoSignals.push('external_url_not_in_post');
+  // Also check for bare domain names (e.g. "finallyoffline.com" without protocol) split across lines
+  const urlsInComment = comment.content.match(URL_REGEX) ?? [];
+  URL_REGEX.lastIndex = 0;
+  const bareDomainMatch = comment.content.match(/\b[\w-]+\.(com|org|net|io|xyz|co|dev|app|ai)\b/gi) ?? [];
+  const allMentionedDomains = [
+    ...urlsInComment.map(u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } }),
+    ...bareDomainMatch.map(d => d.toLowerCase().replace(/^www\./, '')),
+  ].filter(d => d.length > 0);
+  const foreignDomains = allMentionedDomains.filter(d =>
+    !WHITELISTED_DOMAINS.has(d) && !ctx.postUrlDomains.has(d)
+  );
+  if (foreignDomains.length > 0) {
+    selfPromoHits++;
+    promoSignals.push('external_url_not_in_post');
+  }
+
+  // Detect "@username on X/Twitter" self-promo: commenter directing to their own social
+  const atMentionMatch = comment.content.match(/@(\w+)\s+on\s+(x|twitter)/i);
+  if (atMentionMatch) {
+    const mentioned = atMentionMatch[1].toLowerCase();
+    const authorNorm = comment.author.toLowerCase().replace(/[_-]/g, '');
+    const mentionedNorm = mentioned.replace(/[_-]/g, '');
+    // If the mentioned handle matches or is contained in the author name (or vice versa)
+    if (authorNorm.includes(mentionedNorm) || mentionedNorm.includes(authorNorm) || authorNorm === mentionedNorm) {
+      selfPromoHits += 2;
+      promoSignals.push('self_mention_social');
     }
   }
 
-  if (selfPromoHits >= 1 && (hasUrl || selfPromoHits >= 2)) {
+  const hasForeignRef = foreignDomains.length > 0 || !!atMentionMatch;
+  if (selfPromoHits >= 1 && (hasUrl || hasForeignRef || selfPromoHits >= 2)) {
     promoSignals.unshift('self_promo_language');
     if (hasUrl && !promoSignals.includes('external_url_not_in_post')) promoSignals.push('contains_url');
     return {
