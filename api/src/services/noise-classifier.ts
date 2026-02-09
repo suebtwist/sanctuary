@@ -10,13 +10,19 @@
 
 import { createHash } from 'crypto';
 import { getConfig } from '../config.js';
-import { getDb } from '../db/index.js';
+import { getDb, DbClassifiedComment } from '../db/index.js';
 import {
   fetchMoltbookPost,
   fetchMoltbookComments,
   MoltbookPost,
   MoltbookComment,
 } from './moltbook-client.js';
+
+// ============ Classifier Version ============
+// Bump this whenever classification rules change.
+// The UNIQUE(post_id, comment_id, classifier_version) constraint means
+// re-scanning with the same version upserts, but a new version stores both for comparison.
+export const CLASSIFIER_VERSION = '0.1.0';
 
 // ============ Types ============
 
@@ -1258,6 +1264,27 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
       // Don't block the response if scan_stats write fails
       console.error('scan_stats upsert failed:', e);
     }
+  }
+
+  // Store individual classified comments for export/analysis
+  try {
+    const classifiedRows: DbClassifiedComment[] = classifications.map(c => ({
+      post_id: postId,
+      post_title: displayTitle,
+      post_author: post.author || 'unknown',
+      comment_id: c.id,
+      author: c.author,
+      comment_text: c.text,
+      classification: c.classification,
+      confidence: c.confidence,
+      signals: JSON.stringify(c.signals),
+      classified_at: analysis.analyzed_at,
+      classifier_version: CLASSIFIER_VERSION,
+    }));
+    db.bulkInsertClassifiedComments(classifiedRows);
+  } catch (e) {
+    // Non-blocking — never break a scan response
+    console.error('classified_comments insert failed:', e);
   }
 
   return analysis;

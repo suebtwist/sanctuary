@@ -6,8 +6,9 @@
  */
 
 import { FastifyInstance } from 'fastify';
-import { analyzePost, PostAnalysis } from '../services/noise-classifier.js';
+import { analyzePost, PostAnalysis, CLASSIFIER_VERSION } from '../services/noise-classifier.js';
 import { getDb } from '../db/index.js';
+import { getConfig } from '../config.js';
 
 // ============ Stats Cache ============
 
@@ -205,6 +206,234 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
       generated_at: new Date().toISOString(),
       overall_avg_signal_rate: Math.round((overallSum / rows.length) * 100) / 100,
       buckets,
+    });
+  });
+
+  // ============ Export Auth Helper ============
+
+  function checkExportSecret(secret?: string): boolean {
+    const config = getConfig();
+    return !!(config.exportSecret && secret === config.exportSecret);
+  }
+
+  /**
+   * GET /noise/export?secret=<EXPORT_SECRET>&format=csv|json&version=latest|all|x.y.z&classification=...&post_id=...&author=...&limit=1000&offset=0
+   *
+   * Full export of classified comments. Requires EXPORT_SECRET.
+   */
+  fastify.get<{
+    Querystring: { secret?: string; format?: string; version?: string; classification?: string; post_id?: string; author?: string; limit?: string; offset?: string };
+  }>('/export', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!checkExportSecret(request.query.secret)) {
+      return reply.status(401).send({ success: false, error: 'Unauthorized' });
+    }
+
+    const db = getDb();
+    const format = request.query.format === 'json' ? 'json' : 'csv';
+    const version = request.query.version || 'latest';
+    const classification = request.query.classification;
+    const postId = request.query.post_id;
+    const author = request.query.author;
+    const limit = Math.min(Math.max(parseInt(request.query.limit || '1000', 10) || 1000, 1), 5000);
+    const offset = parseInt(request.query.offset || '0', 10) || 0;
+
+    // Map friendly classification names to internal names
+    const classificationMap: Record<string, string> = {
+      template: 'spam_template',
+      duplicate: 'spam_duplicate',
+      promo: 'self_promo',
+    };
+    const mappedClassification = classification ? (classificationMap[classification] || classification) : undefined;
+
+    const rows = db.getClassifiedComments({
+      version,
+      classification: mappedClassification,
+      postId,
+      author,
+      limit,
+      offset,
+    });
+
+    if (format === 'json') {
+      return reply.send({ success: true, total: rows.length, data: rows });
+    }
+
+    // CSV format
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    reply.header('Content-Type', 'text/csv');
+    reply.header('Content-Disposition', `attachment; filename="noise-export-${timestamp}.csv"`);
+
+    const csvHeader = 'post_id,post_title,post_author,comment_id,author,comment_text,classification,confidence,signals,classified_at,classifier_version\n';
+
+    function csvEscape(val: string | number | null | undefined): string {
+      if (val == null) return '';
+      const s = String(val);
+      if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    }
+
+    const csvRows = rows.map(r =>
+      [r.post_id, r.post_title, r.post_author, r.comment_id, r.author, r.comment_text, r.classification, r.confidence, r.signals, r.classified_at, r.classifier_version]
+        .map(csvEscape).join(',')
+    );
+
+    return reply.send(csvHeader + csvRows.join('\n'));
+  });
+
+  /**
+   * GET /noise/export/summary?secret=<EXPORT_SECRET>
+   *
+   * Aggregate summary of all classified comments.
+   */
+  fastify.get<{
+    Querystring: { secret?: string };
+  }>('/export/summary', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!checkExportSecret(request.query.secret)) {
+      return reply.status(401).send({ success: false, error: 'Unauthorized' });
+    }
+
+    const db = getDb();
+    const summary = db.getClassifiedCommentsSummary();
+    const topSpam = db.getTopAuthors('noise', 10);
+    const topSignal = db.getTopAuthors('signal', 10);
+    const latestVersion = db.getLatestClassifierVersion();
+    const totalPosts = db.getDistinctPostCount();
+
+    // Map internal classification names to friendly names for display
+    const friendlyNames: Record<string, string> = {
+      spam_template: 'template',
+      spam_duplicate: 'duplicate',
+      self_promo: 'promo',
+    };
+    const byClassification: Record<string, number> = {};
+    for (const [cls, count] of Object.entries(summary.byClassification)) {
+      byClassification[friendlyNames[cls] || cls] = count;
+    }
+
+    // Compute avg signal rate from latest version
+    const latestTotal = Object.values(summary.byClassification).reduce((a, b) => a + b, 0);
+    const signalCount = summary.byClassification['signal'] || 0;
+    const avgSignalRate = latestTotal > 0 ? Math.round((signalCount / latestTotal) * 100) / 100 : 0;
+
+    return reply.send({
+      total_comments: summary.total,
+      total_posts: totalPosts,
+      by_classification: byClassification,
+      by_version: summary.byVersion,
+      top_spam_authors: topSpam,
+      top_signal_authors: topSignal,
+      avg_signal_rate: avgSignalRate,
+      latest_classifier_version: latestVersion || CLASSIFIER_VERSION,
+      oldest_scan: summary.oldestScan,
+      newest_scan: summary.newestScan,
+    });
+  });
+
+  /**
+   * GET /noise/export/diff?secret=<EXPORT_SECRET>&old=0.1.0&new=0.1.1
+   *
+   * Compare classifications between two classifier versions.
+   */
+  fastify.get<{
+    Querystring: { secret?: string; old?: string; new?: string };
+  }>('/export/diff', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!checkExportSecret(request.query.secret)) {
+      return reply.status(401).send({ success: false, error: 'Unauthorized' });
+    }
+
+    const oldVersion = request.query.old;
+    const newVersion = request.query.new;
+    if (!oldVersion || !newVersion) {
+      return reply.status(400).send({ success: false, error: 'Both old and new version parameters are required' });
+    }
+
+    const db = getDb();
+    const changes = db.getClassifierDiff(oldVersion, newVersion, 500);
+
+    let noiseToSignal = 0;
+    let signalToNoise = 0;
+    let noiseTypeChanges = 0;
+
+    for (const c of changes) {
+      const oldIsSignal = c.old_classification === 'signal';
+      const newIsSignal = c.new_classification === 'signal';
+      if (!oldIsSignal && newIsSignal) noiseToSignal++;
+      else if (oldIsSignal && !newIsSignal) signalToNoise++;
+      else noiseTypeChanges++;
+    }
+
+    return reply.send({
+      total_changed: changes.length,
+      changes,
+      summary: {
+        noise_to_signal: noiseToSignal,
+        signal_to_noise: signalToNoise,
+        noise_type_changes: noiseTypeChanges,
+      },
+    });
+  });
+
+  /**
+   * GET /noise/bulk-scan?secret=<EXPORT_SECRET>&source=scan_stats&limit=100
+   *
+   * Re-scan posts to populate classified_comments table.
+   * Uses existing scan pipeline with 2s delay between posts.
+   */
+  fastify.get<{
+    Querystring: { secret?: string; source?: string; limit?: string };
+  }>('/bulk-scan', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!checkExportSecret(request.query.secret)) {
+      return reply.status(401).send({ success: false, error: 'Unauthorized' });
+    }
+
+    const db = getDb();
+    const limit = Math.min(Math.max(parseInt(request.query.limit || '100', 10) || 100, 1), 500);
+
+    // Get all post IDs from scan_stats
+    const postIds = db.getAllScanStatsPostIds().slice(0, limit);
+
+    const results: Array<{ post_id: string; status: string; signal_rate?: number; comments?: number }> = [];
+    const errors: Array<{ post_id: string; error: string }> = [];
+
+    for (let i = 0; i < postIds.length; i++) {
+      const postId = postIds[i];
+      try {
+        // Delete cached noise_analysis so the classifier re-runs and stores classified_comments
+        db.deleteNoiseAnalysis(postId);
+
+        const analysis = await analyzePost(postId);
+        if (analysis) {
+          results.push({
+            post_id: postId,
+            status: 'ok',
+            signal_rate: analysis.signal_rate,
+            comments: analysis.total_comments,
+          });
+        } else {
+          errors.push({ post_id: postId, error: 'Post not found or API unavailable' });
+        }
+
+        // 2s delay between posts to avoid hammering Moltbook API
+        if (i < postIds.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      } catch (e: any) {
+        errors.push({ post_id: postId, error: e.message || 'Unknown error' });
+      }
+    }
+
+    return reply.send({
+      total: postIds.length,
+      completed: results.length,
+      failed: errors.length,
+      results,
+      errors,
     });
   });
 

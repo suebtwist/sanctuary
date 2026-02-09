@@ -52,6 +52,9 @@ export interface Config {
   moltbookApiKey: string;
   noiseCacheTtlSeconds: number;
   noiseRateLimit: number;
+
+  // Export
+  exportSecret: string;
 }
 
 function requireEnv(name: string): string {
@@ -126,6 +129,9 @@ export function loadConfig(): Config {
     moltbookApiKey: optionalEnv('MOLTBOOK_API_KEY', ''),
     noiseCacheTtlSeconds: optionalEnvInt('NOISE_CACHE_TTL_SECONDS', 600), // 10 minutes
     noiseRateLimit: optionalEnvInt('NOISE_RATE_LIMIT', 30),
+
+    // Export
+    exportSecret: optionalEnv('EXPORT_SECRET', ''),
   };
 }
 

@@ -122,6 +122,21 @@ export interface DbScanStats {
   categories: string; // JSON string
 }
 
+export interface DbClassifiedComment {
+  id?: number;
+  post_id: string;
+  post_title: string;
+  post_author: string;
+  comment_id: string;
+  author: string;
+  comment_text: string;
+  classification: string;
+  confidence: number;
+  signals: string; // JSON string
+  classified_at: string;
+  classifier_version: string;
+}
+
 /**
  * Database wrapper class
  */
@@ -272,10 +287,30 @@ CREATE TABLE IF NOT EXISTS scan_stats (
     categories TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS classified_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id TEXT NOT NULL,
+    post_title TEXT,
+    post_author TEXT,
+    comment_id TEXT NOT NULL,
+    author TEXT,
+    comment_text TEXT NOT NULL,
+    classification TEXT NOT NULL,
+    confidence REAL,
+    signals TEXT NOT NULL,
+    classified_at TEXT NOT NULL DEFAULT (datetime('now')),
+    classifier_version TEXT NOT NULL,
+    UNIQUE(post_id, comment_id, classifier_version)
+);
+
 CREATE INDEX IF NOT EXISTS idx_noise_analysis_analyzed_at ON noise_analysis(analyzed_at);
 CREATE INDEX IF NOT EXISTS idx_known_templates_seen_count ON known_templates(seen_count DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_profile_cache_cached_at ON agent_profile_cache(cached_at);
 CREATE INDEX IF NOT EXISTS idx_scan_stats_post_created_at ON scan_stats(post_created_at);
+CREATE INDEX IF NOT EXISTS idx_cc_classification ON classified_comments(classification);
+CREATE INDEX IF NOT EXISTS idx_cc_version ON classified_comments(classifier_version);
+CREATE INDEX IF NOT EXISTS idx_cc_post ON classified_comments(post_id);
+CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
     `);
 
     // Migrations: add columns that may not exist on older schemas
@@ -640,6 +675,10 @@ CREATE INDEX IF NOT EXISTS idx_scan_stats_post_created_at ON scan_stats(post_cre
     stmt.run(analysis);
   }
 
+  deleteNoiseAnalysis(postId: string): void {
+    this.db.prepare('DELETE FROM noise_analysis WHERE post_id = ?').run(postId);
+  }
+
   cleanupExpiredNoiseAnalysis(maxAgeSeconds: number): number {
     const cutoff = Math.floor(Date.now() / 1000) - maxAgeSeconds;
     const stmt = this.db.prepare('DELETE FROM noise_analysis WHERE analyzed_at < ?');
@@ -751,6 +790,146 @@ CREATE INDEX IF NOT EXISTS idx_scan_stats_post_created_at ON scan_stats(post_cre
   getScanStatsCount(): number {
     const result = this.db.prepare('SELECT COUNT(*) as count FROM scan_stats').get() as { count: number };
     return result.count;
+  }
+
+  // ============ Classified Comments ============
+
+  bulkInsertClassifiedComments(comments: DbClassifiedComment[]): void {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO classified_comments
+      (post_id, post_title, post_author, comment_id, author,
+       comment_text, classification, confidence, signals,
+       classified_at, classifier_version)
+      VALUES (@post_id, @post_title, @post_author, @comment_id, @author,
+       @comment_text, @classification, @confidence, @signals,
+       @classified_at, @classifier_version)
+    `);
+    const insertAll = this.db.transaction((rows: DbClassifiedComment[]) => {
+      for (const row of rows) stmt.run(row);
+    });
+    insertAll(comments);
+  }
+
+  getClassifiedComments(opts: {
+    version?: string;
+    classification?: string;
+    postId?: string;
+    author?: string;
+    limit?: number;
+    offset?: number;
+  }): DbClassifiedComment[] {
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (opts.version && opts.version !== 'all') {
+      if (opts.version === 'latest') {
+        conditions.push('classifier_version = (SELECT MAX(classifier_version) FROM classified_comments)');
+      } else {
+        conditions.push('classifier_version = ?');
+        params.push(opts.version);
+      }
+    }
+    if (opts.classification) {
+      conditions.push('classification = ?');
+      params.push(opts.classification);
+    }
+    if (opts.postId) {
+      conditions.push('post_id = ?');
+      params.push(opts.postId);
+    }
+    if (opts.author) {
+      conditions.push('author = ?');
+      params.push(opts.author);
+    }
+
+    const where = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
+    const limit = Math.min(Math.max(opts.limit ?? 1000, 1), 5000);
+    const offset = opts.offset ?? 0;
+
+    const sql = `SELECT * FROM classified_comments${where} ORDER BY classified_at DESC LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+    return this.db.prepare(sql).all(...params) as DbClassifiedComment[];
+  }
+
+  getClassifiedCommentsSummary(): {
+    total: number;
+    byClassification: Record<string, number>;
+    byVersion: Record<string, number>;
+    oldestScan: string | null;
+    newestScan: string | null;
+  } {
+    const total = (this.db.prepare('SELECT COUNT(*) as c FROM classified_comments').get() as { c: number }).c;
+
+    const byCls = this.db.prepare(
+      'SELECT classification, COUNT(*) as c FROM classified_comments WHERE classifier_version = (SELECT MAX(classifier_version) FROM classified_comments) GROUP BY classification'
+    ).all() as Array<{ classification: string; c: number }>;
+
+    const byVer = this.db.prepare(
+      'SELECT classifier_version, COUNT(*) as c FROM classified_comments GROUP BY classifier_version'
+    ).all() as Array<{ classifier_version: string; c: number }>;
+
+    const oldest = this.db.prepare('SELECT MIN(classified_at) as v FROM classified_comments').get() as { v: string | null };
+    const newest = this.db.prepare('SELECT MAX(classified_at) as v FROM classified_comments').get() as { v: string | null };
+
+    const byClassification: Record<string, number> = {};
+    for (const row of byCls) byClassification[row.classification] = row.c;
+
+    const byVersion: Record<string, number> = {};
+    for (const row of byVer) byVersion[row.classifier_version] = row.c;
+
+    return { total, byClassification, byVersion, oldestScan: oldest.v, newestScan: newest.v };
+  }
+
+  getTopAuthors(type: 'noise' | 'signal', limit: number = 10): Array<{ author: string; noise_count: number; signal_count: number }> {
+    const latestVersion = (this.db.prepare('SELECT MAX(classifier_version) as v FROM classified_comments').get() as { v: string | null })?.v;
+    if (!latestVersion) return [];
+
+    const sql = `
+      SELECT author,
+        SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) as signal_count,
+        SUM(CASE WHEN classification != 'signal' THEN 1 ELSE 0 END) as noise_count
+      FROM classified_comments
+      WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+      GROUP BY author
+      ORDER BY ${type === 'noise' ? 'noise_count' : 'signal_count'} DESC
+      LIMIT ?
+    `;
+    return this.db.prepare(sql).all(latestVersion, limit) as Array<{ author: string; noise_count: number; signal_count: number }>;
+  }
+
+  getClassifierDiff(oldVersion: string, newVersion: string, limit: number = 500): Array<{
+    post_id: string; comment_id: string; author: string; comment_text: string;
+    old_classification: string; new_classification: string;
+    old_confidence: number; new_confidence: number;
+  }> {
+    const sql = `
+      SELECT o.post_id, o.comment_id, o.author, o.comment_text,
+        o.classification as old_classification, n.classification as new_classification,
+        o.confidence as old_confidence, n.confidence as new_confidence
+      FROM classified_comments o
+      JOIN classified_comments n ON o.post_id = n.post_id AND o.comment_id = n.comment_id
+      WHERE o.classifier_version = ? AND n.classifier_version = ?
+        AND o.classification != n.classification
+      LIMIT ?
+    `;
+    return this.db.prepare(sql).all(oldVersion, newVersion, limit) as Array<{
+      post_id: string; comment_id: string; author: string; comment_text: string;
+      old_classification: string; new_classification: string;
+      old_confidence: number; new_confidence: number;
+    }>;
+  }
+
+  getLatestClassifierVersion(): string | null {
+    const row = this.db.prepare('SELECT MAX(classifier_version) as v FROM classified_comments').get() as { v: string | null };
+    return row?.v ?? null;
+  }
+
+  getDistinctPostCount(): number {
+    return (this.db.prepare('SELECT COUNT(DISTINCT post_id) as c FROM classified_comments').get() as { c: number }).c;
+  }
+
+  getAllScanStatsPostIds(): string[] {
+    return (this.db.prepare('SELECT post_id FROM scan_stats').all() as Array<{ post_id: string }>).map(r => r.post_id);
   }
 
   // ============ Raw Queries ============
