@@ -763,8 +763,10 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     <div class="comment-list" id="commentList"></div>
   </div>
 
-  <div class="stats-section" id="statsSection" style="display:none;">
+  <div class="stats-section" id="statsSection">
     <h3>Platform Stats</h3>
+    <div id="statsLoading" style="text-align:center;padding:20px;color:var(--text-muted);font-size:14px;">Loading stats...</div>
+    <div id="statsError" style="display:none;text-align:center;padding:20px;color:var(--red);font-size:14px;"></div>
     <div class="stats-grid" id="statsGrid"></div>
     <div class="cls-bar-container" id="clsBarContainer" style="display:none;">
       <div class="cls-bar" id="clsBar"></div>
@@ -1019,10 +1021,17 @@ const CLS_LABELS = {
 };
 
 async function loadStats() {
+  var loadingEl = document.getElementById('statsLoading');
+  var errorEl = document.getElementById('statsError');
   try {
     const resp = await fetch(API_BASE + '/noise/stats');
     const json = await resp.json();
-    if (!json.success || json.data.total_posts_analyzed === 0) return;
+    if (loadingEl) loadingEl.style.display = 'none';
+
+    if (!json.success || json.data.total_posts_analyzed === 0) {
+      if (errorEl) { errorEl.textContent = 'No posts analyzed yet.'; errorEl.style.display = 'block'; }
+      return;
+    }
 
     const d = json.data;
     const grid = document.getElementById('statsGrid');
@@ -1080,8 +1089,12 @@ async function loadStats() {
     meta.innerHTML = '<span><span class="live-dot"></span>Auto-refreshing every 60s</span>' +
       '<span>Classifier v' + (d.classifier_version || '?') + ' &middot; Updated ' + new Date(d.last_updated).toLocaleTimeString() + '</span>';
 
-    document.getElementById('statsSection').style.display = 'block';
-  } catch {}
+    if (errorEl) errorEl.style.display = 'none';
+  } catch (err) {
+    console.error('loadStats failed:', err);
+    if (loadingEl) loadingEl.style.display = 'none';
+    if (errorEl) { errorEl.textContent = 'Failed to load stats: ' + (err.message || err); errorEl.style.display = 'block'; }
+  }
 }
 
 // Auto-refresh stats every 60 seconds
