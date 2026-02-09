@@ -352,6 +352,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
           <span id="rateLabel"></span>
         </div>
         <div class="signal-bar"><div class="signal-bar-fill" id="signalBarFill"></div></div>
+        <div id="sampleNote" style="display:none;font-size:12px;color:var(--text-muted);margin-top:6px;"></div>
       </div>
       <div class="breakdown" id="breakdown"></div>
     </div>
@@ -466,9 +467,19 @@ async function analyze() {
 function renderResults(data) {
   document.getElementById('postTitle').textContent = data.post_title || 'Untitled Post';
   document.getElementById('postAuthor').textContent = 'by ' + (data.post_author || 'unknown');
-  document.getElementById('signalLabel').textContent = data.signal_count + '/' + data.total_comments;
+  const analyzed = data.total_comments;
+  const totalPost = data.total_post_comments || analyzed;
+  const isSampled = totalPost > analyzed;
+  document.getElementById('signalLabel').textContent = data.signal_count + '/' + analyzed + (isSampled ? ' (sampled from ' + totalPost.toLocaleString() + ' comments)' : '');
   document.getElementById('rateLabel').textContent = Math.round(data.signal_rate * 100) + '%';
   document.getElementById('signalBarFill').style.width = Math.round(data.signal_rate * 100) + '%';
+  var sampleNote = document.getElementById('sampleNote');
+  if (isSampled) {
+    sampleNote.textContent = 'Showing analysis of the most recent ' + analyzed + ' comments out of ' + totalPost.toLocaleString() + '.';
+    sampleNote.style.display = 'block';
+  } else {
+    sampleNote.style.display = 'none';
+  }
 
   // Breakdown
   const bd = document.getElementById('breakdown');

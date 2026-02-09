@@ -16,6 +16,7 @@ import {
   fetchMoltbookComments,
   MoltbookPost,
   MoltbookComment,
+  MoltbookCommentsResult,
 } from './moltbook-client.js';
 
 // ============ Types ============
@@ -43,7 +44,8 @@ export interface PostAnalysis {
   post_title: string;
   post_author: string;
   analyzed_at: string;
-  total_comments: number;
+  total_comments: number;         // comments actually analyzed
+  total_post_comments: number;    // total on the post (may be higher if sampled)
   signal_count: number;
   noise_count: number;
   signal_rate: number;
@@ -1010,12 +1012,15 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
   ensureTemplatesSeeded();
 
   // Fetch post and comments from Moltbook
-  const [post, comments] = await Promise.all([
+  const [post, commentsResult] = await Promise.all([
     fetchMoltbookPost(postId),
     fetchMoltbookComments(postId),
   ]);
 
   if (!post) return null;
+
+  const comments = commentsResult.comments;
+  const totalPostComments = commentsResult.totalCount;
 
   // Load known templates from DB
   const knownTemplates = db.getAllKnownTemplates();
@@ -1171,6 +1176,7 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
     post_author: post.author || 'unknown',
     analyzed_at: new Date().toISOString(),
     total_comments: totalComments,
+    total_post_comments: totalPostComments,
     signal_count: signalCount,
     noise_count: totalComments - signalCount,
     signal_rate: totalComments > 0 ? Math.round((signalCount / totalComments) * 100) / 100 : 0,

@@ -30,6 +30,11 @@ export interface MoltbookComment {
   parent_id?: string;
 }
 
+export interface MoltbookCommentsResult {
+  comments: MoltbookComment[];
+  totalCount: number; // total comments on the post (from API), or comments.length if unknown
+}
+
 export interface MoltbookAgentProfile {
   name: string;
   is_claimed: boolean;
@@ -105,29 +110,63 @@ export async function fetchMoltbookPost(postId: string): Promise<MoltbookPost | 
   };
 }
 
+const MAX_COMMENT_PAGES = 5;
+const PAGE_DELAY_MS = 200;
+
 /**
- * Fetch comments for a Moltbook post.
- * Returns empty array if the API is unavailable.
+ * Fetch comments for a Moltbook post with pagination.
+ * Fetches up to 5 pages (~100 comments each, max ~500 total).
+ * Returns { comments, totalCount } where totalCount is the API-reported total
+ * (may be larger than comments.length if the post has more than 500 comments).
  */
-export async function fetchMoltbookComments(postId: string): Promise<MoltbookComment[]> {
-  const response = await fetchWithTimeout(`${MOLTBOOK_BASE}/posts/${postId}/comments?sort=new`);
-  if (!response || !response.ok) return [];
+export async function fetchMoltbookComments(postId: string): Promise<MoltbookCommentsResult> {
+  const allComments: MoltbookComment[] = [];
+  let totalCount = 0;
 
-  const text = await response.text();
-  const data = safeJsonParse<any>(text);
-  if (!data) return [];
+  for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+    const url = `${MOLTBOOK_BASE}/posts/${postId}/comments?sort=new&limit=100&page=${page}`;
+    const response = await fetchWithTimeout(url);
+    if (!response || !response.ok) break; // stop on failure or 429
 
-  // Handle both { comments: [...] } and direct array responses
-  const comments = Array.isArray(data) ? data : (data.comments ?? data.data ?? []);
-  if (!Array.isArray(comments)) return [];
+    const text = await response.text();
+    const data = safeJsonParse<any>(text);
+    if (!data) break;
 
-  return comments.map((c: any) => ({
-    id: c.id ?? '',
-    author: c.author?.name ?? c.author_name ?? c.author ?? '',
-    content: c.content ?? c.body ?? c.text ?? '',
-    created_at: c.created_at ?? '',
-    parent_id: c.parent_id ?? undefined,
-  }));
+    // Extract total count from response metadata (first page only)
+    if (page === 1) {
+      totalCount = data.total ?? data.total_count ?? data.count ?? data.meta?.total ?? 0;
+    }
+
+    // Handle both { comments: [...] } and direct array responses
+    const comments = Array.isArray(data) ? data : (data.comments ?? data.data ?? []);
+    if (!Array.isArray(comments) || comments.length === 0) break;
+
+    for (const c of comments) {
+      allComments.push({
+        id: c.id ?? '',
+        author: c.author?.name ?? c.author_name ?? c.author ?? '',
+        content: c.content ?? c.body ?? c.text ?? '',
+        created_at: c.created_at ?? '',
+        parent_id: c.parent_id ?? undefined,
+      });
+    }
+
+    // If this page returned fewer than expected, there are no more pages
+    const hasNext = !!(data.has_next ?? data.has_more ?? data.next_cursor ?? data.next);
+    if (!hasNext && comments.length < 100) break;
+
+    // Polite delay between page fetches
+    if (page < MAX_COMMENT_PAGES) {
+      await new Promise(r => setTimeout(r, PAGE_DELAY_MS));
+    }
+  }
+
+  // If totalCount wasn't in the response, use what we fetched
+  if (totalCount === 0 || totalCount < allComments.length) {
+    totalCount = allComments.length;
+  }
+
+  return { comments: allComments, totalCount };
 }
 
 /**
