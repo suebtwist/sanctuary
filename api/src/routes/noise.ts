@@ -1087,7 +1087,12 @@ async function loadStats() {
         primaryBar.appendChild(slopSeg);
 
         // Secondary bar: Slop subcategory breakdown (excludes signal)
+        // Align secondary bar with slop portion of primary bar
+        var subLabel = document.querySelector('.slop-sub-label');
+        if (subLabel) { subLabel.style.marginLeft = signalPct + '%'; }
         var bar = document.getElementById('clsBar');
+        bar.style.marginLeft = signalPct + '%';
+        bar.style.width = slopPct + '%';
         var legend = document.getElementById('clsLegend');
         bar.innerHTML = '';
         legend.innerHTML = '';
