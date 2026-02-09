@@ -794,6 +794,11 @@ CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
 
   // ============ Classified Comments ============
 
+  clearClassifiedComments(): number {
+    const result = this.db.prepare('DELETE FROM classified_comments').run();
+    return result.changes;
+  }
+
   bulkInsertClassifiedComments(comments: DbClassifiedComment[]): void {
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO classified_comments

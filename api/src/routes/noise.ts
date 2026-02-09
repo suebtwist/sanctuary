@@ -395,13 +395,14 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
-   * GET /noise/bulk-scan?secret=<EXPORT_SECRET>&source=scan_stats&limit=100
+   * GET /noise/bulk-scan?secret=<EXPORT_SECRET>&limit=100&delay=2000&fresh=true
    *
    * Re-scan posts to populate classified_comments table.
-   * Uses existing scan pipeline with 2s delay between posts.
+   * fresh=true (default): deletes all classified_comments first, preserves known_templates.
+   * delay: ms between posts (default 2000).
    */
   fastify.get<{
-    Querystring: { secret?: string; source?: string; limit?: string };
+    Querystring: { secret?: string; limit?: string; delay?: string; fresh?: string };
   }>('/bulk-scan', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!checkExportSecret(request.query.secret)) {
@@ -410,6 +411,18 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
 
     const db = getDb();
     const limit = Math.min(Math.max(parseInt(request.query.limit || '100', 10) || 100, 1), 500);
+    const delay = Math.min(Math.max(parseInt(request.query.delay || '2000', 10) || 2000, 500), 10000);
+    const fresh = request.query.fresh !== 'false'; // default true
+
+    let cleared = 0;
+    if (fresh) {
+      cleared = db.clearClassifiedComments();
+      // Also clear noise_analysis cache so all posts re-run
+      const analyses = db.getAllNoiseAnalyses();
+      for (const a of analyses) db.deleteNoiseAnalysis(a.post_id);
+      const templateCount = db.getTopTemplates(99999).length;
+      console.log(`[bulk-scan] Fresh mode: cleared ${cleared} classified comments, ${analyses.length} cached analyses. Preserved ${templateCount} known templates.`);
+    }
 
     // Get all post IDs from scan_stats
     const postIds = db.getAllScanStatsPostIds().slice(0, limit);
@@ -420,8 +433,8 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     for (let i = 0; i < postIds.length; i++) {
       const postId = postIds[i];
       try {
-        // Delete cached noise_analysis so the classifier re-runs and stores classified_comments
-        db.deleteNoiseAnalysis(postId);
+        // Delete cached noise_analysis so the classifier re-runs
+        if (!fresh) db.deleteNoiseAnalysis(postId);
 
         const analysis = await analyzePost(postId);
         if (analysis) {
@@ -435,9 +448,9 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
           errors.push({ post_id: postId, error: 'Post not found or API unavailable' });
         }
 
-        // 2s delay between posts to avoid hammering Moltbook API
+        // Delay between posts to avoid hammering Moltbook API
         if (i < postIds.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise(resolve => setTimeout(resolve, delay));
         }
       } catch (e: any) {
         errors.push({ post_id: postId, error: e.message || 'Unknown error' });
@@ -448,6 +461,7 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
       total: postIds.length,
       completed: results.length,
       failed: errors.length,
+      cleared,
       results,
       errors,
     });

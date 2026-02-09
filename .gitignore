@@ -47,6 +47,11 @@ Thumbs.db
 coverage/
 .nyc_output/
 
+# Exports & local analysis files
+*.csv
+noise-filter-tunings*.md
+noise_export*
+
 # Misc
 *.tmp
 *.temp
