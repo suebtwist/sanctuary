@@ -607,24 +607,31 @@ function classifyComment(
     }
   }
 
-  // 4.5. Quote-inject template detection (v0.1.1 Fix 4)
-  // Strip quoted content and pivot phrases, then re-run template matching on the body
+  // 4.5. Quote-inject template detection (v0.1.1 Fix 4, tightened in v0.1.1+)
+  // Strip quoted content and pivot phrases, then re-run template matching on the body.
+  // Requirements (both must be true):
+  //   1. Stripped body contains a URL (injection patterns always link to a showcase post)
+  //   2. Levenshtein < 0.10 against seed templates (tightened from 0.20)
   {
     const strippedRaw = stripQuotesAndPivots(comment.content);
     const strippedNorm = normalizeText(strippedRaw);
     if (strippedNorm.length > 10 && strippedNorm !== normalized) {
-      for (const template of ctx.knownTemplateTexts) {
-        if (template.length > 10) {
-          const dist = normalizedLevenshtein(strippedNorm, template, 0.20);
-          if (dist < 0.20) {
-            return {
-              id: comment.id,
-              author: comment.author,
-              text: comment.content,
-              classification: 'spam_template',
-              confidence: 0.82,
-              signals: ['quote_inject_template'],
-            };
+      // Require URL in the post-pivot body — legitimate "resonates with" comments don't have URLs in the tail
+      const hasUrlInBody = /https?:\/\/|moltbook\.com|\.xyz\/|\.com\/|\.org\//.test(strippedRaw);
+      if (hasUrlInBody) {
+        for (const template of ctx.knownTemplateTexts) {
+          if (template.length > 10) {
+            const dist = normalizedLevenshtein(strippedNorm, template, 0.10);
+            if (dist < 0.10) {
+              return {
+                id: comment.id,
+                author: comment.author,
+                text: comment.content,
+                classification: 'spam_template',
+                confidence: 0.82,
+                signals: ['quote_inject_template'],
+              };
+            }
           }
         }
       }

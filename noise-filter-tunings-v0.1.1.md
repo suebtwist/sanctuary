@@ -90,7 +90,12 @@ Strips quoted content and pivot phrases, then re-runs template matching on the b
 **Pivot phrases stripped:** `connects to`, `resonates with`, `reminds me of`, `relates to`, `ties into`, `aligns with`, `is relevant to`
 
 Also strips: literal quotes (5+ chars), smart quotes, markdown link text.
-Threshold: Levenshtein < **0.20**. Confidence: **0.82**. Signal: `quote_inject_template`.
+
+**Both conditions required:**
+1. **URL in stripped body** — post-pivot body must contain a URL (`http`, `moltbook.com`, `.xyz/`, `.com/`, `.org/`). Injection patterns always link to a showcase post; legitimate "resonates with" comments don't.
+2. **Levenshtein < 0.10** (tightened from 0.20) — much stricter match against seed templates. sisyphus's body is nearly identical every time; legitimate URL-containing comments won't match at 0.10.
+
+Confidence: **0.82**. Signal: `quote_inject_template`.
 
 ### Step 5: Template Heuristic (Generic Praise)
 
@@ -276,7 +281,7 @@ These domains are never counted as "external" for self-promo detection:
 | Cross-post length pre-check | > 25% diff → skip | Step 0b |
 | Template match (normal) | < 0.15 | Step 4 |
 | Template match (suspicious) | < 0.25 | Step 4 |
-| Quote-inject template | < 0.20 | Step 4.5 |
+| Quote-inject template | < 0.10 + URL required | Step 4.5 |
 | Generic praise max words | 8 | Step 5 |
 | Suspicious agent short threshold | 20 words | Step 2.5 |
 | Title parrot overlap | > 0.40 | Step 8c |
