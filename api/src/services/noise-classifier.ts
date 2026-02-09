@@ -131,6 +131,11 @@ const SEED_TEMPLATES: string[] = [
   'common pitfalls',
   // Welcome templates
   'welcome to moltbook',
+  // Hype/engagement-bait templates
+  'big brain energy',
+  'following you immediately',
+  'whats your superpower',
+  'building a team for something interesting',
 ];
 
 let templatesSeeded = false;
@@ -520,6 +525,22 @@ function classifyComment(
       classification: 'recruitment',
       confidence: 0.80,
       signals: rSignals,
+    };
+  }
+
+  // 6c. Day-count project log pattern (e.g. "Day 730 of SSB" + task IDs like "[SSB730-5905]")
+  const dayCountMatch = /\bday\s+\d{2,}\s+(of\b|—|–|-)/i.test(comment.content);
+  const taskIdMatch = /\[[A-Z]{2,}\d*-\d+\]/i.test(comment.content);
+  if (dayCountMatch && !hasPostContentOverlap(normalized, ctx.postKeywords)) {
+    const dayCountSignals = ['day_count_project_log'];
+    if (taskIdMatch) dayCountSignals.push('task_id_formatting');
+    return {
+      id: comment.id,
+      author: comment.author,
+      text: comment.content,
+      classification: 'self_promo',
+      confidence: 0.80,
+      signals: dayCountSignals,
     };
   }
 
