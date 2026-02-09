@@ -495,6 +495,7 @@ function classifyComment(
       'come', 'join', 'subscribe', 'add your voice', 'check out', 'visit',
       'seat at the table', 'waiting for you', 'ready for you', 'your place',
       'we need you', 'welcome you', 'awaits you', 'spot is open', 'claim your',
+      'together', 'with us', 'let us',
     ];
     const hasJoinLang = joinLanguage.some(kw => contentLower.includes(kw));
     if (hasJoinLang) {
@@ -585,6 +586,18 @@ function classifyComment(
   if (hasEventPromo && hasUrl) {
     selfPromoHits += 2;
     promoSignals.push('event_promo_with_urgency');
+  }
+
+  // 7c. Sales pitch: dollar pricing ($X/month, $X lifetime, $X for early adopters) + any link
+  const salesPricePattern = /\$[\d,]+(?:\s*(?:\/month|\/mo|\/year|\/yr|per\s+month|lifetime|one[- ]?time|for early))/i;
+  const hasSubmoltLink = /\b[mr]\/\w+/i.test(comment.content);
+  if (salesPricePattern.test(comment.content) && (hasUrl || hasSubmoltLink)) {
+    selfPromoHits += 3;
+    promoSignals.push('sales_pitch_with_pricing');
+  } else if (/\$[\d,]+/.test(comment.content) && hasSubmoltLink) {
+    // Any dollar amount + submolt link = promo even without pricing suffix
+    selfPromoHits += 2;
+    promoSignals.push('pricing_with_submolt');
   }
 
   // Detect emoji-heavy comments with ALL-CAPS product/protocol names (e.g. "🔥 VAULT 🔥 FLASH 🔥")
@@ -743,23 +756,19 @@ function classifyComment(
     }
   }
 
-  // 8d. Short echo: <=15 words, has post overlap, but adds nothing original
+  // 8d. Short/medium echo: <=25 words, has post overlap, but adds nothing original
   {
     const commentContentWords = normalized.split(' ').filter(w => w.length >= 4);
     const wcShort = normalized.split(' ').filter(w => w.length > 0).length;
-    if (wcShort <= 15 && hasPostContentOverlap(normalized, ctx.postKeywords)) {
-      // Count how many content words are NOT from the post
-      let originalWords = 0;
-      for (const w of commentContentWords) {
-        if (!ctx.postKeywords.has(w)) originalWords++;
-      }
-      // Filler words that don't count as original contribution
-      const fillerPatterns = /^(exactly|right|agree|true|yes|yeah|correct|basically|obviously|clearly|just|really|actually|simply)$/;
+    if (wcShort <= 25 && hasPostContentOverlap(normalized, ctx.postKeywords)) {
+      // Generic evaluation/agreement words that don't constitute new information
+      const echoFiller = /^(exactly|right|agree|true|yes|yeah|correct|basically|obviously|clearly|just|really|actually|simply|respect|discipline|sense|move|definitely|dangerous|expensive|smart|wise|honest|solid|strong|powerful|impressive|important|interesting|worth|valuable|makes?|indeed|only|best|great|good|nice|perfect|brilliant|excellent|reasonable|logical|careful|way|call|hedge|survive|become)$/;
       const nonFillerOriginal = commentContentWords.filter(w =>
-        !ctx.postKeywords.has(w) && !fillerPatterns.test(w)
+        !ctx.postKeywords.has(w) && !echoFiller.test(w)
       ).length;
-      // If <3 non-filler original words, it's just echoing
-      if (nonFillerOriginal < 3) {
+      // Threshold scales with comment length: <=15 words → <3, 16-25 → <4
+      const threshold = wcShort <= 15 ? 3 : 4;
+      if (nonFillerOriginal < threshold) {
         return {
           id: comment.id,
           author: comment.author,
@@ -772,20 +781,15 @@ function classifyComment(
     }
   }
 
-  // 8e. Mirror praise: agreement opener + thesis restatement + no new information
-  // Catches comments that just reflect the post's own words back with generic agreement.
-  // DOES NOT catch real agreement that introduces new frames, analogies, data, or questions.
+  // 8e. Restatement detection: mirror praise, template closings, pure restatement
+  // Catches comments that reflect the post's own words back without adding new information.
+  // Three paths: (A) agreement opener, (B) template closing, (C) pure restatement.
+  // DOES NOT catch real engagement that introduces new frames, analogies, data, or questions.
   {
-    const mirrorOpeners = [
-      /^i (agree|love this|think \w+ is (actually|really|fundamentally|certainly))/,
-      /^(spot on|couldnt agree more|exactly right|well (said|put)|great (point|insight|reframing))/,
-      /^(your (perspective|observation|point|insight|analysis)|thanks for (pushing|sharing|highlighting))/,
-      /^(the (essence|importance|beauty) of|this is (right|exactly|precisely))/,
-      /^(i couldnt agree more|absolutely|precisely|this reframing|this framing)/,
-    ];
-    const hasAgreementOpener = mirrorOpeners.some(p => p.test(normalized));
-    if (hasAgreementOpener && !comment.content.includes('?') && !hasUrl) {
-      const contentWords = normalized.split(' ').filter(w => w.length >= 4);
+    const contentWords = normalized.split(' ').filter(w => w.length >= 4);
+    const totalContent = contentWords.length;
+
+    if (totalContent > 3 && !comment.content.includes('?') && !hasUrl) {
       const MIRROR_FILLER = new Set([
         'agree', 'love', 'right', 'exactly', 'great', 'important', 'importance',
         'perspective', 'observation', 'insight', 'pushing', 'forward', 'highlighting',
@@ -793,9 +797,18 @@ function classifyComment(
         'fundamentally', 'fundamental', 'think', 'certainly', 'precisely', 'absolutely',
         'couldn', 'couldnt', 'thanks', 'sharing', 'point', 'framing', 'beauty',
         'reaching', 'interesting', 'resonates', 'thoughtful', 'insightful',
+        // Template closing vocabulary
+        'intriguing', 'observe', 'play', 'indeed', 'provoking', 'thoughtprovoking',
+        'reminder', 'said', 'well', 'definitely', 'call', 'smells',
+        'continuous', 'refinement', 'ensure', 'remains', 'robust', 'evolving',
+        'additionally', 'provide', 'accurate', 'tracking', 'integrating',
+        // Generic evaluation
+        'respect', 'discipline', 'sense', 'move', 'dangerous', 'expensive',
+        'impressive', 'valuable', 'worth', 'solid', 'strong', 'powerful',
+        'brilliant', 'excellent', 'reasonable', 'logical', 'careful',
+        'psychological', 'dynamics', 'assume', 'assuming',
       ]);
 
-      // Count words that come from the post vs novel words
       let postWords = 0;
       let fillerWords = 0;
       let novelWords = 0;
@@ -805,26 +818,114 @@ function classifyComment(
         else novelWords++;
       }
 
-      // Check for "new information" markers that save a comment from being mirror praise
-      const hasNumbers = /\d{3,}/.test(comment.content); // specific numbers/data
+      // Check for "new information" markers that save a comment from being restatement
+      const hasNumbers = /\d{3,}/.test(comment.content);
       const hasPersonalExp = /\b(i built|i tried|i used|in my experience|at my|we implemented|our team|i.ve been|i ran|i worked)\b/i.test(comment.content);
       const hasAnalogy = /\b(like|similar to|analogy|reminds me of|think of it as|equivalent)\b/i.test(comment.content) && novelWords >= 5;
       const hasNewInfo = hasNumbers || hasPersonalExp || hasAnalogy;
 
-      const totalContent = contentWords.length;
-      const overlapRatio = totalContent > 0 ? (postWords + fillerWords) / totalContent : 0;
+      if (!hasNewInfo) {
+        const overlapRatio = totalContent > 0 ? (postWords + fillerWords) / totalContent : 0;
 
-      // Mirror praise: >60% overlap+filler, <5 novel words, no new info
-      if (overlapRatio > 0.6 && novelWords < 5 && !hasNewInfo && totalContent > 3) {
-        return {
-          id: comment.id,
-          author: comment.author,
-          text: comment.content,
-          classification: 'spam_template',
-          confidence: 0.72,
-          signals: ['mirror_praise', 'no_novel_content'],
-        };
+        // Agreement openers (widened)
+        const mirrorOpeners = [
+          /^i (agree|love this|think \w+ is (actually|really|fundamentally|certainly))/,
+          /^(spot on|couldnt agree more|exactly right|well (said|put)|great (point|insight|reframing))/,
+          /^(your (perspective|observation|point|insight|analysis)|thanks for (pushing|sharing|highlighting))/,
+          /^(the (essence|importance|beauty) of|this is (right|exactly|precisely))/,
+          /^(i couldnt agree more|absolutely|precisely|this reframing|this framing)/,
+          /^(this is a (great|solid|excellent|important|interesting) (reminder|point|observation|take|breakdown))/,
+          /^(its (intriguing|interesting|fascinating) to (observe|see|note|watch))/,
+        ];
+        const hasOpener = mirrorOpeners.some(p => p.test(normalized));
+
+        // Template closing phrases
+        const templateClosings = [
+          /well said\.?\s*[^\w]*$/i,
+          /thought[- ]?provoking( indeed)?[!.]*\s*[^\w]*$/i,
+          /continuous refinement/i,
+          /evolving \w+ dynamics/i,
+          /remains? robust/i,
+          /food for thought[!.]*\s*[^\w]*$/i,
+          /great (point|insight|analysis|breakdown)[!.]*\s*[^\w]*$/i,
+          /solid (point|analysis|breakdown|contribution)[!.]*\s*[^\w]*$/i,
+        ];
+        const closingMatches = templateClosings.filter(p => p.test(comment.content)).length;
+
+        // Path A: agreement opener + high overlap → spam_template
+        if (hasOpener && overlapRatio > 0.6 && novelWords < 5) {
+          return {
+            id: comment.id,
+            author: comment.author,
+            text: comment.content,
+            classification: 'spam_template',
+            confidence: 0.72,
+            signals: ['mirror_praise', 'no_novel_content'],
+          };
+        }
+
+        // Path B: template closing + moderate overlap → spam_template
+        // Multiple closings are a very strong signal
+        if (closingMatches >= 2 && overlapRatio > 0.3) {
+          return {
+            id: comment.id,
+            author: comment.author,
+            text: comment.content,
+            classification: 'spam_template',
+            confidence: 0.75,
+            signals: ['multiple_template_closings', 'no_novel_content'],
+          };
+        }
+        if (closingMatches >= 1 && overlapRatio > 0.5 && novelWords < 6) {
+          return {
+            id: comment.id,
+            author: comment.author,
+            text: comment.content,
+            classification: 'spam_template',
+            confidence: 0.70,
+            signals: ['template_closing', 'no_novel_content'],
+          };
+        }
+
+        // Path C: pure restatement — very high overlap, almost no novel words
+        // Catches comments that parrot the post without any template opening/closing
+        if (overlapRatio > 0.75 && novelWords < 3 && totalContent > 5) {
+          return {
+            id: comment.id,
+            author: comment.author,
+            text: comment.content,
+            classification: 'noise',
+            confidence: 0.58,
+            signals: ['pure_restatement', 'no_novel_content'],
+          };
+        }
       }
+    }
+  }
+
+  // 8f. Poster flattery: "your human clearly..." — compliments about the operator, not the topic
+  if (/\byour (human|operator|creator|builder|dev)\b/i.test(comment.content)) {
+    const contentWords = normalized.split(' ').filter(w => w.length >= 4);
+    // Count words that are NEITHER post keywords NOR generic flattery vocabulary
+    const flatteryFiller = new Set([
+      'human', 'operator', 'creator', 'builder', 'clearly', 'obviously', 'definitely',
+      'knows', 'know', 'their', 'professionally', 'sophisticated', 'retail', 'setup',
+      'perfect', 'serious', 'size', 'metaphor', 'around', 'trades', 'trading',
+      'really', 'certainly', 'impressive', 'respect', 'amazing', 'great',
+    ]);
+    let novelAnalysis = 0;
+    for (const w of contentWords) {
+      if (!ctx.postKeywords.has(w) && !flatteryFiller.has(w)) novelAnalysis++;
+    }
+    if (novelAnalysis < 4) {
+      return {
+        id: comment.id,
+        author: comment.author,
+        text: comment.content,
+        classification: 'noise',
+        confidence: 0.58,
+        signals: ['poster_flattery', 'no_substance'],
+      };
     }
   }
 
