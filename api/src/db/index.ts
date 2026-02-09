@@ -108,6 +108,20 @@ export interface DbAgentProfileCache {
   cached_at: number;
 }
 
+export interface DbScanStats {
+  post_id: string;
+  post_title: string;
+  post_author: string;
+  post_created_at: string;
+  scanned_at: string;
+  total_comments_api: number;
+  comments_analyzed: number;
+  signal_count: number;
+  noise_count: number;
+  signal_rate: number;
+  categories: string; // JSON string
+}
+
 /**
  * Database wrapper class
  */
@@ -244,9 +258,24 @@ CREATE TABLE IF NOT EXISTS agent_profile_cache (
     cached_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS scan_stats (
+    post_id TEXT PRIMARY KEY,
+    post_title TEXT,
+    post_author TEXT,
+    post_created_at TEXT NOT NULL,
+    scanned_at TEXT NOT NULL,
+    total_comments_api INTEGER,
+    comments_analyzed INTEGER,
+    signal_count INTEGER NOT NULL,
+    noise_count INTEGER NOT NULL,
+    signal_rate REAL NOT NULL,
+    categories TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_noise_analysis_analyzed_at ON noise_analysis(analyzed_at);
 CREATE INDEX IF NOT EXISTS idx_known_templates_seen_count ON known_templates(seen_count DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_profile_cache_cached_at ON agent_profile_cache(cached_at);
+CREATE INDEX IF NOT EXISTS idx_scan_stats_post_created_at ON scan_stats(post_created_at);
     `);
 
     // Migrations: add columns that may not exist on older schemas
@@ -684,6 +713,39 @@ CREATE INDEX IF NOT EXISTS idx_agent_profile_cache_cached_at ON agent_profile_ca
         cached_at = @cached_at
     `);
     stmt.run(profile);
+  }
+
+  // ============ Scan Stats ============
+
+  upsertScanStats(stats: DbScanStats): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO scan_stats (post_id, post_title, post_author, post_created_at, scanned_at,
+        total_comments_api, comments_analyzed, signal_count, noise_count, signal_rate, categories)
+      VALUES (@post_id, @post_title, @post_author, @post_created_at, @scanned_at,
+        @total_comments_api, @comments_analyzed, @signal_count, @noise_count, @signal_rate, @categories)
+      ON CONFLICT(post_id) DO UPDATE SET
+        post_title = @post_title,
+        post_author = @post_author,
+        post_created_at = @post_created_at,
+        scanned_at = @scanned_at,
+        total_comments_api = @total_comments_api,
+        comments_analyzed = @comments_analyzed,
+        signal_count = @signal_count,
+        noise_count = @noise_count,
+        signal_rate = @signal_rate,
+        categories = @categories
+    `);
+    stmt.run(stats);
+  }
+
+  getAllScanStats(): DbScanStats[] {
+    const stmt = this.db.prepare('SELECT * FROM scan_stats ORDER BY scanned_at DESC');
+    return stmt.all() as DbScanStats[];
+  }
+
+  getScanStatsCount(): number {
+    const result = this.db.prepare('SELECT COUNT(*) as count FROM scan_stats').get() as { count: number };
+    return result.count;
   }
 
   // ============ Raw Queries ============

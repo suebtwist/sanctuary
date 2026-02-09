@@ -141,6 +141,73 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
+   * GET /noise/benchmark
+   *
+   * Signal rate vs post age benchmark. Cached for 5 minutes.
+   */
+  fastify.get('/benchmark', async (_request, reply) => {
+    reply.header('Cache-Control', 'public, max-age=300');
+
+    const db = getDb();
+    const rows = db.getAllScanStats();
+
+    if (rows.length < 5) {
+      return reply.send({ total_posts_scanned: rows.length, insufficient_data: true });
+    }
+
+    const nowMs = Date.now();
+    const BUCKETS = [
+      { label: '<1h', min: 0, max: 1 },
+      { label: '1-6h', min: 1, max: 6 },
+      { label: '6-24h', min: 6, max: 24 },
+      { label: '1-3d', min: 24, max: 72 },
+      { label: '3-7d', min: 72, max: 168 },
+      { label: '7-30d', min: 168, max: 720 },
+      { label: '30d+', min: 720, max: Infinity },
+    ];
+
+    const bucketData: Map<string, { rates: number[]; comments: number[] }> = new Map();
+    for (const b of BUCKETS) bucketData.set(b.label, { rates: [], comments: [] });
+
+    let overallSum = 0;
+    for (const row of rows) {
+      const createdMs = new Date(row.post_created_at).getTime();
+      if (isNaN(createdMs)) continue;
+      const ageHours = (nowMs - createdMs) / 3_600_000;
+      for (const b of BUCKETS) {
+        if (ageHours >= b.min && ageHours < b.max) {
+          const bd = bucketData.get(b.label)!;
+          bd.rates.push(row.signal_rate);
+          bd.comments.push(row.comments_analyzed);
+          break;
+        }
+      }
+      overallSum += row.signal_rate;
+    }
+
+    const buckets = [];
+    for (const b of BUCKETS) {
+      const bd = bucketData.get(b.label)!;
+      if (bd.rates.length < 2) continue;
+      buckets.push({
+        label: b.label,
+        min_age_hours: b.min,
+        max_age_hours: b.max === Infinity ? null : b.max,
+        avg_signal_rate: Math.round((bd.rates.reduce((a, c) => a + c, 0) / bd.rates.length) * 100) / 100,
+        post_count: bd.rates.length,
+        avg_comments: Math.round(bd.comments.reduce((a, c) => a + c, 0) / bd.comments.length),
+      });
+    }
+
+    return reply.send({
+      total_posts_scanned: rows.length,
+      generated_at: new Date().toISOString(),
+      overall_avg_signal_rate: Math.round((overallSum / rows.length) * 100) / 100,
+      buckets,
+    });
+  });
+
+  /**
    * GET /noise/page
    *
    * Serves the web fallback HTML page for URL-based analysis.
@@ -324,6 +391,29 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; color: var(--text-muted); font-size: 14px;
   }
+  .benchmark-section { display: none; margin-bottom: 20px; }
+  .benchmark-toggle {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 0; cursor: pointer; color: var(--text-muted); font-size: 13px;
+    border-bottom: 1px solid var(--border); user-select: none;
+  }
+  .benchmark-toggle:hover { color: var(--text); }
+  .benchmark-chevron { transition: transform 0.2s; font-size: 11px; }
+  .benchmark-chevron.open { transform: rotate(90deg); }
+  .benchmark-body {
+    max-height: 0; overflow: hidden; transition: max-height 0.3s ease;
+  }
+  .benchmark-body.open { max-height: 400px; }
+  .benchmark-inner { padding: 16px 0 8px; }
+  .benchmark-chart { width: 100%; height: 190px; }
+  .benchmark-context {
+    font-size: 12px; color: var(--text-muted); margin-top: 10px; line-height: 1.5;
+  }
+  .benchmark-stats { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  @media (max-width: 768px) {
+    .benchmark-chart { height: 150px; }
+    .benchmark-body.open { max-height: 360px; }
+  }
 </style>
 </head>
 <body>
@@ -355,6 +445,20 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
         <div id="sampleNote" style="display:none;font-size:12px;color:var(--text-muted);margin-top:6px;"></div>
       </div>
       <div class="breakdown" id="breakdown"></div>
+    </div>
+
+    <div class="benchmark-section" id="benchmarkSection">
+      <div class="benchmark-toggle" onclick="toggleBenchmark()">
+        <span id="benchmarkLabel"></span>
+        <span class="benchmark-chevron" id="benchmarkChevron">&#9656;</span>
+      </div>
+      <div class="benchmark-body" id="benchmarkBody">
+        <div class="benchmark-inner">
+          <svg class="benchmark-chart" id="benchmarkChart"></svg>
+          <div class="benchmark-context">Signal rates tend to increase as posts age. Spam clusters early; real engagement accumulates.</div>
+          <div class="benchmark-stats" id="benchmarkStats"></div>
+        </div>
+      </div>
     </div>
 
     <div class="controls">
@@ -438,6 +542,9 @@ async function analyze() {
     currentData = json.data;
     renderResults(json.data);
     results.style.display = 'block';
+
+    // Load benchmark in background (non-blocking)
+    loadBenchmark(json.data);
 
     // Show share link
     const shareLink = SHARE_BASE + '?post=' + encodeURIComponent(postId);
@@ -646,6 +753,142 @@ function copyShare() {
     btn.textContent = 'Copied!';
     setTimeout(() => { btn.textContent = 'Copy link'; }, 1500);
   }).catch(() => {});
+}
+
+// ============ Benchmark ============
+let benchmarkCache = null;
+let benchmarkOpen = false;
+
+function toggleBenchmark() {
+  benchmarkOpen = !benchmarkOpen;
+  document.getElementById('benchmarkBody').classList.toggle('open', benchmarkOpen);
+  document.getElementById('benchmarkChevron').classList.toggle('open', benchmarkOpen);
+}
+
+function getPostAgeLabel(ms) {
+  var h = ms / 3600000;
+  if (h < 1) return Math.round(h * 60) + ' minutes old';
+  if (h < 24) return Math.round(h) + ' hours old';
+  var d = h / 24;
+  if (d < 7) return Math.round(d) + ' days old';
+  if (d < 30) return Math.round(d / 7) + ' weeks old';
+  return Math.round(d / 30) + ' months old';
+}
+
+async function loadBenchmark(postData) {
+  var section = document.getElementById('benchmarkSection');
+  section.style.display = 'none';
+  if (!postData.post_created_at) return;
+
+  try {
+    if (!benchmarkCache) {
+      var resp = await fetch(API_BASE + '/noise/benchmark');
+      var json = await resp.json();
+      if (json.insufficient_data) return;
+      benchmarkCache = json;
+    }
+    var bm = benchmarkCache;
+    if (!bm.buckets || bm.buckets.length === 0) return;
+
+    document.getElementById('benchmarkLabel').textContent =
+      '\\u{1F4CA} Signal vs Post Age \\u2014 ' + bm.total_posts_scanned + ' posts analyzed';
+    section.style.display = 'block';
+
+    // Current post age
+    var postAgeMs = Date.now() - new Date(postData.post_created_at).getTime();
+    var postAgeHours = postAgeMs / 3600000;
+    var postRate = postData.signal_rate;
+
+    // Stats line
+    document.getElementById('benchmarkStats').textContent =
+      'Based on ' + bm.total_posts_scanned + ' posts analyzed. \\u25CF This post: ' +
+      getPostAgeLabel(postAgeMs) + ', ' + Math.round(postRate * 100) + '% signal';
+
+    renderBenchmarkChart(bm.buckets, postAgeHours, postRate);
+  } catch (e) { /* hide silently */ }
+}
+
+function renderBenchmarkChart(buckets, postAgeH, postRate) {
+  var svg = document.getElementById('benchmarkChart');
+  var W = svg.clientWidth || 700;
+  var H = svg.clientHeight || 190;
+  var pad = { t: 20, r: 20, b: 36, l: 44 };
+  var cW = W - pad.l - pad.r;
+  var cH = H - pad.t - pad.b;
+
+  // Map bucket labels to x positions (midpoint in hours, log-ish scale)
+  var mids = buckets.map(function(b) {
+    var lo = b.min_age_hours;
+    var hi = b.max_age_hours != null ? b.max_age_hours : lo * 2;
+    return (lo + hi) / 2;
+  });
+  var xMin = mids[0], xMax = mids[mids.length - 1];
+  var xRange = xMax - xMin || 1;
+  function xPos(h) { return pad.l + ((h - xMin) / xRange) * cW; }
+  function yPos(r) { return pad.t + (1 - r) * cH; }
+
+  var lines = '';
+  // Gridlines
+  [0, 0.25, 0.5, 0.75, 1].forEach(function(r) {
+    var y = yPos(r);
+    lines += '<line x1="' + pad.l + '" y1="' + y + '" x2="' + (W - pad.r) + '" y2="' + y +
+      '" stroke="' + (r === 0 ? 'var(--border)' : 'rgba(255,255,255,0.05)') + '" stroke-width="1"/>';
+    lines += '<text x="' + (pad.l - 6) + '" y="' + (y + 4) +
+      '" fill="var(--text-muted)" font-size="10" text-anchor="end">' + Math.round(r * 100) + '%</text>';
+  });
+
+  // X labels
+  buckets.forEach(function(b, i) {
+    lines += '<text x="' + xPos(mids[i]) + '" y="' + (H - 6) +
+      '" fill="var(--text-muted)" font-size="10" text-anchor="middle">' + b.label + '</text>';
+  });
+
+  // Data line
+  var pts = buckets.map(function(b, i) { return xPos(mids[i]) + ',' + yPos(b.avg_signal_rate); });
+  lines += '<polyline points="' + pts.join(' ') +
+    '" fill="none" stroke="var(--green)" stroke-width="2" stroke-linejoin="round"/>';
+
+  // Data dots + invisible hover targets
+  buckets.forEach(function(b, i) {
+    var cx = xPos(mids[i]), cy = yPos(b.avg_signal_rate);
+    lines += '<circle cx="' + cx + '" cy="' + cy + '" r="4" fill="var(--green)" stroke="var(--bg)" stroke-width="2"/>';
+    lines += '<circle cx="' + cx + '" cy="' + cy +
+      '" r="14" fill="transparent" stroke="none"><title>Posts aged ' + b.label + ': ' +
+      Math.round(b.avg_signal_rate * 100) + '% avg signal (' + b.post_count + ' posts)</title></circle>';
+  });
+
+  // Current post marker — interpolate x from age
+  var postX = Math.max(pad.l, Math.min(W - pad.r, xPos(postAgeH)));
+  // Interpolate y along the line
+  var postLineY = yPos(postRate);
+  // Find the interpolated benchmark rate at this age for the dashed line
+  var interpRate = null;
+  for (var i = 0; i < mids.length - 1; i++) {
+    if (postAgeH >= mids[i] && postAgeH <= mids[i + 1]) {
+      var t = (postAgeH - mids[i]) / (mids[i + 1] - mids[i]);
+      interpRate = buckets[i].avg_signal_rate + t * (buckets[i + 1].avg_signal_rate - buckets[i].avg_signal_rate);
+      break;
+    }
+  }
+  if (interpRate === null) {
+    interpRate = postAgeH <= mids[0] ? buckets[0].avg_signal_rate : buckets[buckets.length - 1].avg_signal_rate;
+  }
+
+  // Dashed line at this post's rate if different from benchmark
+  if (Math.abs(postRate - interpRate) > 0.08) {
+    var dashY = yPos(postRate);
+    lines += '<line x1="' + pad.l + '" y1="' + dashY + '" x2="' + (W - pad.r) + '" y2="' + dashY +
+      '" stroke="rgba(255,255,255,0.15)" stroke-width="1" stroke-dasharray="4,4"/>';
+  }
+
+  // Current post dot (glow ring)
+  lines += '<circle cx="' + postX + '" cy="' + yPos(interpRate) +
+    '" r="8" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="2"/>';
+  lines += '<circle cx="' + postX + '" cy="' + yPos(interpRate) +
+    '" r="5" fill="white" stroke="var(--bg)" stroke-width="2">' +
+    '<title>This post: ' + Math.round(postRate * 100) + '% signal</title></circle>';
+
+  svg.innerHTML = lines;
 }
 
 // Enter key submits

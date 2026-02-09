@@ -42,6 +42,7 @@ export interface PostAnalysis {
   post_id: string;
   post_title: string;
   post_author: string;
+  post_created_at: string;        // ISO timestamp from Moltbook post metadata
   analyzed_at: string;
   total_comments: number;         // comments actually analyzed
   total_post_comments: number;    // total on the post (may be higher if sampled)
@@ -1181,6 +1182,7 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
     post_id: postId,
     post_title: displayTitle,
     post_author: post.author || 'unknown',
+    post_created_at: post.created_at || '',
     analyzed_at: new Date().toISOString(),
     total_comments: totalComments,
     total_post_comments: totalPostComments,
@@ -1199,6 +1201,36 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
     analyzed_at: now,
     comment_count: totalComments,
   });
+
+  // Record scan stats for benchmark (non-blocking)
+  if (post.created_at) {
+    try {
+      const categoryLabels: Record<string, string> = {
+        signal: 'real', spam_template: 'template', spam_duplicate: 'duplicate',
+        scam: 'scam', recruitment: 'recruitment', self_promo: 'promo', noise: 'noise',
+      };
+      const categories: Record<string, number> = {};
+      for (const [cat, count] of Object.entries(summary)) {
+        if (count > 0) categories[categoryLabels[cat] || cat] = count;
+      }
+      db.upsertScanStats({
+        post_id: postId,
+        post_title: displayTitle,
+        post_author: post.author || 'unknown',
+        post_created_at: post.created_at,
+        scanned_at: analysis.analyzed_at,
+        total_comments_api: totalPostComments,
+        comments_analyzed: totalComments,
+        signal_count: signalCount,
+        noise_count: totalComments - signalCount,
+        signal_rate: analysis.signal_rate,
+        categories: JSON.stringify(categories),
+      });
+    } catch (e) {
+      // Don't block the response if scan_stats write fails
+      console.error('scan_stats upsert failed:', e);
+    }
+  }
 
   return analysis;
 }
