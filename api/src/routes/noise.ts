@@ -156,27 +156,16 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     }
 
     const nowMs = Date.now();
-    const BUCKETS = [
-      { label: '<1h',  min: 0,   max: 1 },
-      { label: '6h',   min: 1,   max: 6 },
-      { label: '24h',  min: 6,   max: 24 },
-      { label: '2d',   min: 24,  max: 48 },
-      { label: '3d',   min: 48,  max: 72 },
-      { label: '4d',   min: 72,  max: 96 },
-      { label: '5d',   min: 96,  max: 120 },
-      { label: '6d',   min: 120, max: 144 },
-      { label: '7d',   min: 144, max: 168 },
-      { label: '8d',   min: 168, max: 192 },
-      { label: '9d',   min: 192, max: 216 },
-      { label: '10d',  min: 216, max: 240 },
-      { label: '11d',  min: 240, max: 264 },
-      { label: '12d',  min: 264, max: 288 },
-      { label: '13d',  min: 288, max: 312 },
-      { label: '14d',  min: 312, max: 336 },
-      { label: '21d',  min: 336, max: 504 },
-      { label: '30d',  min: 504, max: 720 },
-      { label: '30d+', min: 720, max: Infinity },
+    // Every single day, like a stock chart
+    const BUCKETS: Array<{ label: string; min: number; max: number }> = [
+      { label: '<1h', min: 0,  max: 1 },
+      { label: '6h',  min: 1,  max: 6 },
+      { label: '1d',  min: 6,  max: 24 },
     ];
+    for (let d = 2; d <= 30; d++) {
+      BUCKETS.push({ label: `${d}d`, min: (d - 1) * 24, max: d * 24 });
+    }
+    BUCKETS.push({ label: '30d+', min: 720, max: Infinity });
 
     const bucketData: Map<string, { rates: number[]; comments: number[] }> = new Map();
     for (const b of BUCKETS) bucketData.set(b.label, { rates: [], comments: [] });
