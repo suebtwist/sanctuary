@@ -24,7 +24,9 @@ interface NoiseStats {
   avg_signal_rate: number;
   worst_signal_rate: number;
   best_signal_rate: number;
+  by_classification: Record<string, number>;
   top_template_phrases: Array<{ text: string; count: number }>;
+  classifier_version: string;
   last_updated: string;
 }
 
@@ -105,6 +107,18 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     const analyses = db.getAllNoiseAnalyses();
     const topTemplates = db.getTopTemplates(10);
 
+    // Get classification breakdown from classified_comments table
+    const summary = db.getClassifiedCommentsSummary();
+    const friendlyNames: Record<string, string> = {
+      spam_template: 'template',
+      spam_duplicate: 'duplicate',
+      self_promo: 'promo',
+    };
+    const byClassification: Record<string, number> = {};
+    for (const [cls, count] of Object.entries(summary.byClassification)) {
+      byClassification[friendlyNames[cls] || cls] = count;
+    }
+
     let totalComments = 0;
     let totalSignal = 0;
     let worstRate = 1;
@@ -132,7 +146,9 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
       avg_signal_rate: analyses.length > 0 ? Math.round((sumRate / analyses.length) * 100) / 100 : 0,
       worst_signal_rate: analyses.length > 0 ? worstRate : 0,
       best_signal_rate: bestRate,
+      by_classification: byClassification,
       top_template_phrases: topTemplates.map(t => ({ text: t.normalized_text, count: t.seen_count })),
+      classifier_version: CLASSIFIER_VERSION,
       last_updated: new Date().toISOString(),
     };
 
@@ -610,6 +626,29 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   }
   .stat-value { font-size: 24px; font-weight: 700; }
   .stat-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  .cls-bar-container { margin: 16px 0; }
+  .cls-bar {
+    height: 24px; border-radius: 6px; overflow: hidden; display: flex;
+    background: var(--border);
+  }
+  .cls-bar-seg { height: 100%; transition: width 0.5s ease; min-width: 0; }
+  .cls-legend {
+    display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px;
+  }
+  .cls-legend-item {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 12px; color: var(--text-muted);
+  }
+  .cls-legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .stats-meta {
+    font-size: 11px; color: var(--text-muted); margin-top: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .stats-meta .live-dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green); margin-right: 4px; animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
   .footer {
     text-align: center; margin-top: 48px; padding-top: 24px;
     border-top: 1px solid var(--border); color: var(--text-muted); font-size: 13px;
@@ -713,6 +752,11 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   <div class="stats-section" id="statsSection" style="display:none;">
     <h3>Platform Stats</h3>
     <div class="stats-grid" id="statsGrid"></div>
+    <div class="cls-bar-container" id="clsBarContainer" style="display:none;">
+      <div class="cls-bar" id="clsBar"></div>
+      <div class="cls-legend" id="clsLegend"></div>
+    </div>
+    <div class="stats-meta" id="statsMeta"></div>
   </div>
 
   <div id="shareBox" class="ext-cta" style="display:none;">
@@ -951,6 +995,15 @@ function setSort(sort, btn) {
   items.forEach(el => list.appendChild(el));
 }
 
+const CLS_COLORS = {
+  signal: 'var(--green)', template: 'var(--red)', duplicate: 'var(--red)',
+  scam: 'var(--yellow)', recruitment: 'var(--orange)', promo: 'var(--orange)', noise: 'var(--gray)'
+};
+const CLS_LABELS = {
+  signal: 'Signal', template: 'Template spam', duplicate: 'Duplicate',
+  scam: 'Scam', recruitment: 'Recruitment', promo: 'Self-promo', noise: 'Noise'
+};
+
 async function loadStats() {
   try {
     const resp = await fetch(API_BASE + '/noise/stats');
@@ -961,8 +1014,8 @@ async function loadStats() {
     const grid = document.getElementById('statsGrid');
     grid.innerHTML = '';
     const items = [
-      [d.total_posts_analyzed, 'Posts Analyzed'],
-      [d.total_comments_analyzed, 'Comments Scanned'],
+      [d.total_posts_analyzed.toLocaleString(), 'Posts Analyzed'],
+      [d.total_comments_analyzed.toLocaleString(), 'Comments Classified'],
       [Math.round(d.avg_signal_rate * 100) + '%', 'Avg Signal Rate'],
       [Math.round(d.overall_signal_rate * 100) + '%', 'Overall Signal'],
     ];
@@ -972,9 +1025,53 @@ async function loadStats() {
       el.innerHTML = '<div class="stat-value">' + val + '</div><div class="stat-label">' + label + '</div>';
       grid.appendChild(el);
     }
+
+    // Classification breakdown bar
+    if (d.by_classification) {
+      const total = Object.values(d.by_classification).reduce(function(a, b) { return a + b; }, 0);
+      if (total > 0) {
+        var bar = document.getElementById('clsBar');
+        var legend = document.getElementById('clsLegend');
+        bar.innerHTML = '';
+        legend.innerHTML = '';
+        // Sort: signal first, then by count descending
+        var entries = Object.entries(d.by_classification).sort(function(a, b) {
+          if (a[0] === 'signal') return -1;
+          if (b[0] === 'signal') return 1;
+          return b[1] - a[1];
+        });
+        for (var i = 0; i < entries.length; i++) {
+          var cls = entries[i][0], count = entries[i][1];
+          var pct = (count / total * 100);
+          if (pct < 0.5) continue;
+          var seg = document.createElement('div');
+          seg.className = 'cls-bar-seg';
+          seg.style.width = pct + '%';
+          seg.style.background = CLS_COLORS[cls] || 'var(--gray)';
+          seg.title = (CLS_LABELS[cls] || cls) + ': ' + count.toLocaleString() + ' (' + pct.toFixed(1) + '%)';
+          bar.appendChild(seg);
+
+          var li = document.createElement('div');
+          li.className = 'cls-legend-item';
+          li.innerHTML = '<span class="cls-legend-dot" style="background:' + (CLS_COLORS[cls] || 'var(--gray)') + '"></span>' +
+            (CLS_LABELS[cls] || cls) + ' ' + count.toLocaleString() + ' (' + pct.toFixed(1) + '%)';
+          legend.appendChild(li);
+        }
+        document.getElementById('clsBarContainer').style.display = 'block';
+      }
+    }
+
+    // Meta line with version + live indicator
+    var meta = document.getElementById('statsMeta');
+    meta.innerHTML = '<span><span class="live-dot"></span>Auto-refreshing every 60s</span>' +
+      '<span>Classifier v' + (d.classifier_version || '?') + ' &middot; Updated ' + new Date(d.last_updated).toLocaleTimeString() + '</span>';
+
     document.getElementById('statsSection').style.display = 'block';
   } catch {}
 }
+
+// Auto-refresh stats every 60 seconds
+setInterval(loadStats, 60000);
 
 function copyShare() {
   const text = document.getElementById('shareText').textContent;

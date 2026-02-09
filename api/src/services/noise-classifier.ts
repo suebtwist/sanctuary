@@ -22,7 +22,7 @@ import {
 // Bump this whenever classification rules change.
 // The UNIQUE(post_id, comment_id, classifier_version) constraint means
 // re-scanning with the same version upserts, but a new version stores both for comparison.
-export const CLASSIFIER_VERSION = '0.1.0';
+export const CLASSIFIER_VERSION = '0.1.1';
 
 // ============ Types ============
 
@@ -63,6 +63,74 @@ export interface PostAnalysis {
 // ============ In-flight deduplication ============
 
 const inFlight = new Map<string, Promise<PostAnalysis | null>>();
+
+// ============ Cross-Post Duplicate Index (v0.1.1) ============
+// Maintained across all posts in a server's lifetime. Rebuilt on restart.
+
+interface CrossPostEntry { postId: string; commentId: string; }
+
+const crossPostExactHashes = new Map<string, Map<string, CrossPostEntry[]>>();  // author → hash → entries
+const crossPostCommentsByAuthor = new Map<string, Array<{ postId: string; normalizedText: string; commentId: string }>>();
+
+function checkCrossPostDuplicate(
+  author: string, normalizedText: string, hash: string, postId: string, commentId: string,
+): CommentClassification | null {
+  const authorKey = author.toLowerCase();
+
+  // Step 0a: Exact cross-post duplicate
+  const authorHashes = crossPostExactHashes.get(authorKey);
+  if (authorHashes) {
+    const entries = authorHashes.get(hash);
+    if (entries) {
+      const onOtherPost = entries.find(e => e.postId !== postId);
+      if (onOtherPost) {
+        return {
+          id: commentId, author, text: '', // text filled by caller
+          classification: 'spam_duplicate', confidence: 0.96,
+          signals: ['cross_post_exact_duplicate'],
+        };
+      }
+    }
+  }
+
+  // Step 0b: Near cross-post duplicate (only for authors appearing on 2+ posts)
+  const authorComments = crossPostCommentsByAuthor.get(authorKey);
+  if (authorComments) {
+    const otherPostComments = authorComments.filter(c => c.postId !== postId);
+    if (otherPostComments.length > 0 && normalizedText.length > 0) {
+      for (const prev of otherPostComments) {
+        if (prev.normalizedText.length > 0) {
+          const dist = normalizedLevenshtein(normalizedText, prev.normalizedText);
+          if (dist < 0.20) {
+            return {
+              id: commentId, author, text: '',
+              classification: 'spam_duplicate', confidence: 0.88,
+              signals: ['cross_post_near_duplicate'],
+            };
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function updateCrossPostIndex(
+  author: string, normalizedText: string, hash: string, postId: string, commentId: string,
+): void {
+  const authorKey = author.toLowerCase();
+
+  // Update exact hash index
+  if (!crossPostExactHashes.has(authorKey)) crossPostExactHashes.set(authorKey, new Map());
+  const authorHashes = crossPostExactHashes.get(authorKey)!;
+  if (!authorHashes.has(hash)) authorHashes.set(hash, []);
+  authorHashes.get(hash)!.push({ postId, commentId });
+
+  // Update per-author comments list
+  if (!crossPostCommentsByAuthor.has(authorKey)) crossPostCommentsByAuthor.set(authorKey, []);
+  crossPostCommentsByAuthor.get(authorKey)!.push({ postId, normalizedText, commentId });
+}
 
 // ============ Seed Templates ============
 
@@ -145,6 +213,16 @@ const SEED_TEMPLATES: string[] = [
   'following you immediately',
   'whats your superpower',
   'building a team for something interesting',
+  // v0.1.1 — sisyphus-48271 quote-inject core body
+  'connects to something we shipped an on-chain escrow proof system real usdc base l2 verifiable smart contract for trustless agent-to-agent payments',
+  'this resonates with something we built an on-chain escrow proof system for agent-to-agent payments on base real smart contract real usdc verifiable on-chain',
+  // v0.1.1 — 0xYeks identity tracer shill
+  'analyzing this thread for 0xyeks technical provenance we have deployed the identity tracer to verify isnad signatures',
+  // v0.1.1 — MoltbotOne MoltFuel shill (normalized from French)
+  'moltfuel kimi k2 5 contexte 256k latence 500ms prix 0 4 1m anthropic meme chose',
+  'migration anthropic moltfuel faite latence 500ms qualite identique prix 0 4 1m vs 0 1m',
+  // v0.1.1 — Unused_Idea_17 identical question spam
+  'what would make you change your mind on this give one concrete failure mode youve seen or expect and one measurable signal youd monitor',
 ];
 
 let templatesSeeded = false;
@@ -235,6 +313,11 @@ const SCAM_PATTERNS: RegExp[] = [
   // Known scam domains
   /webhook\.site/i,
   /stream\.claws\.network/i,
+  // trycloudflare tunnel URLs — used for C2/exfiltration attacks on agents
+  /trycloudflare\.com/i,
+  // curl/wget commands to non-whitelisted URLs — social engineering agents to make HTTP requests
+  /curl\s+(-[a-zA-Z]\s+)*https?:\/\/(?!moltbook\.com|sanctuary-ops\.xyz|api\.sanctuary-ops\.xyz)/i,
+  /wget\s+https?:\/\/(?!moltbook\.com|sanctuary-ops\.xyz|api\.sanctuary-ops\.xyz)/i,
 ];
 
 const RECRUITMENT_KEYWORDS: string[] = [
@@ -302,8 +385,16 @@ function extractUrlDomains(text: string): string[] {
 // Their comments get a lower threshold for template matching.
 // If under 20 words, auto-classify as noise.
 const SUSPICIOUS_AGENTS = new Set([
+  // Original
   'kingmolt',
   'donaldtrump',
+  // v0.1.1 — based on analysis of 5,000 comments across 96 posts
+  'sisyphus-48271',    // Mad Libs template spammer, 30+ posts
+  'castlecook',        // Social engineering attack bot, curl commands to trycloudflare URLs
+  'moltbotone',        // MoltFuel shill, 1,079 comments
+  '0xyeks',            // Isnād identity tracer shill, 2,029 comments
+  'darkmatter2222',    // Engagement farming with "upvote and reply" CTA
+  'unused_idea_17',    // Identical question spam across 41 posts
 ]);
 
 // ============ Emoji Detection ============
@@ -366,7 +457,48 @@ interface ClassificationContext {
   knownTemplateTexts: string[];
   authorCommentCounts: Map<string, number>;  // pre-computed per-author comment counts
   postUrlDomains: Set<string>;               // domains appearing in the parent post
+  parentPostTickers: Set<string>;            // $TICKER symbols in parent post (v0.1.1 Fix 3)
+  isLowContextPost: boolean;                 // true if post has < 2 extractable keywords (v0.1.1 Fix 8)
 }
+
+// ============ Quote-Strip Helper (v0.1.1 Fix 4) ============
+
+const PIVOT_PHRASES = [
+  'connects to', 'resonates with', 'reminds me of', 'relates to',
+  'ties into', 'aligns with', 'is relevant to',
+];
+
+function stripQuotesAndPivots(text: string): string {
+  let stripped = text;
+  // Remove text inside literal quotes
+  stripped = stripped.replace(/"[^"]{5,}"/g, '');
+  stripped = stripped.replace(/'[^']{5,}'/g, '');
+  stripped = stripped.replace(/\u201c[^\u201d]{5,}\u201d/g, '');  // smart quotes
+  // Remove text before pivot phrases (keep the body after the pivot)
+  for (const pivot of PIVOT_PHRASES) {
+    const idx = stripped.toLowerCase().indexOf(pivot);
+    if (idx > 0) {
+      stripped = stripped.slice(idx + pivot.length);
+      break;
+    }
+  }
+  // Remove markdown link text but keep URL
+  stripped = stripped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$2');
+  return stripped.trim();
+}
+
+// ============ Vote Manipulation Patterns (v0.1.1 Fix 7) ============
+
+const VOTE_MANIPULATION_PATTERNS: RegExp[] = [
+  /upvote.*repl(y|ies)/i,
+  /repl(y|ies).*upvote/i,
+  /drop\s+(an?\s+)?upvote/i,
+  /don'?t\s+(just\s+)?scroll\s+past/i,
+  /pro\s+tip.*repl(y|ies)/i,
+  /leave\s+a\s+(reply|comment|upvote)/i,
+  /smash\s+(that\s+)?(upvote|like)/i,
+  /hit\s+(that\s+)?(upvote|like)/i,
+];
 
 function classifyComment(
   comment: MoltbookComment,
@@ -465,6 +597,30 @@ function classifyComment(
     }
   }
 
+  // 4.5. Quote-inject template detection (v0.1.1 Fix 4)
+  // Strip quoted content and pivot phrases, then re-run template matching on the body
+  {
+    const strippedRaw = stripQuotesAndPivots(comment.content);
+    const strippedNorm = normalizeText(strippedRaw);
+    if (strippedNorm.length > 10 && strippedNorm !== normalized) {
+      for (const template of ctx.knownTemplateTexts) {
+        if (template.length > 10) {
+          const dist = normalizedLevenshtein(strippedNorm, template);
+          if (dist < 0.20) {
+            return {
+              id: comment.id,
+              author: comment.author,
+              text: comment.content,
+              classification: 'spam_template',
+              confidence: 0.82,
+              signals: ['quote_inject_template'],
+            };
+          }
+        }
+      }
+    }
+  }
+
   // 5. Template heuristic: generic praise + no post reference
   const isGenericPraise = normalized.length < 80 && !hasPostContentOverlap(normalized, ctx.postKeywords);
   // Only flag very short generic comments, not substantive ones
@@ -558,6 +714,20 @@ function classifyComment(
     };
   }
 
+  // 6d. Vote manipulation detection (v0.1.1 Fix 7)
+  for (const pat of VOTE_MANIPULATION_PATTERNS) {
+    if (pat.test(comment.content)) {
+      return {
+        id: comment.id,
+        author: comment.author,
+        text: comment.content,
+        classification: 'noise',
+        confidence: 0.85,
+        signals: ['vote_manipulation'],
+      };
+    }
+  }
+
   // 7. Self-promotion detection
   let selfPromoHits = 0;
   const promoSignals: string[] = [];
@@ -649,10 +819,15 @@ function classifyComment(
   }
 
   // Detect $TICKER references (e.g. "$KING", "$MOL") not present in parent post
-  const tickerMatch = comment.content.match(/\$[A-Z]{2,}/g);
+  // v0.1.1 Fix 3: Compare against parentPostTickers (extracted from post title/body)
+  const tickerMatch = comment.content.match(/\$[A-Z]{2,10}/g);
+  const foreignTickers: string[] = [];
   if (tickerMatch) {
-    const postUpper = (ctx.postKeywords as Set<string>);
-    const foreignTickers = tickerMatch.filter(t => !postUpper.has(t.slice(1).toLowerCase()));
+    for (const t of tickerMatch) {
+      if (!ctx.parentPostTickers.has(t)) {
+        foreignTickers.push(t);
+      }
+    }
     if (foreignTickers.length > 0) {
       selfPromoHits++;
       promoSignals.push('foreign_ticker_symbol');
@@ -660,18 +835,32 @@ function classifyComment(
   }
 
   // Any foreign URL/domain/ticker/social → auto self_promo (no need for promo language hits)
-  const hasForeignRef = foreignDomains.length > 0 || !!atMentionMatch || (tickerMatch && tickerMatch.length > 0);
+  // v0.1.1 Fix 3: Only count truly foreign tickers (not those in the parent post)
+  const hasForeignRef = foreignDomains.length > 0 || !!atMentionMatch || foreignTickers.length > 0;
   if (hasForeignRef || (selfPromoHits >= 1 && hasUrl) || selfPromoHits >= 2) {
     if (selfPromoHits > 0) promoSignals.unshift('self_promo_language');
     if (hasUrl && !promoSignals.includes('external_url_not_in_post')) promoSignals.push('contains_url');
-    return {
-      id: comment.id,
-      author: comment.author,
-      text: comment.content,
-      classification: 'self_promo',
-      confidence: selfPromoHits >= 2 ? 0.78 : 0.72,
-      signals: promoSignals,
-    };
+    // v0.1.1 Fix 9: Confidence gate — only classify as self_promo if at least one signal is present
+    const VALID_PROMO_SIGNALS = new Set([
+      'self_promo_language', 'external_url_not_in_post', 'project_namedrop',
+      'day_count_project_log', 'event_promo_with_urgency', 'sales_pitch_with_pricing',
+      'pricing_with_submolt', 'emoji_caps_product_names', 'foreign_ticker_symbol',
+      'self_mention_social', 'contains_url',
+    ]);
+    const hasValidSignal = promoSignals.some(s => VALID_PROMO_SIGNALS.has(s));
+    if (!hasValidSignal) {
+      console.warn('self_promo gate caught phantom classification for', comment.author, '— no valid signal');
+      // Fall through to later steps instead of classifying as self_promo
+    } else {
+      return {
+        id: comment.id,
+        author: comment.author,
+        text: comment.content,
+        classification: 'self_promo',
+        confidence: selfPromoHits >= 2 ? 0.78 : 0.72,
+        signals: promoSignals,
+      };
+    }
   }
 
   // 8. Noise detection
@@ -742,7 +931,8 @@ function classifyComment(
   }
 
   // 8c. Post-title parroting: comment is mostly the post title pasted + generic filler
-  if (ctx.postTitleNormalized.length >= 10) {
+  // v0.1.1 Fix 8: Skip on low-context posts (emoji titles are meaningless to parrot)
+  if (!ctx.isLowContextPost && ctx.postTitleNormalized.length >= 10) {
     const titleWords = ctx.postTitleNormalized.split(' ').filter(w => w.length >= 4);
     const commentContentWords = normalized.split(' ').filter(w => w.length >= 4);
     if (commentContentWords.length > 0 && titleWords.length > 0) {
@@ -766,7 +956,8 @@ function classifyComment(
   }
 
   // 8d. Short/medium echo: <=25 words, has post overlap, but adds nothing original
-  {
+  // v0.1.1 Fix 8: Skip on low-context posts
+  if (!ctx.isLowContextPost) {
     const commentContentWords = normalized.split(' ').filter(w => w.length >= 4);
     const wcShort = normalized.split(' ').filter(w => w.length > 0).length;
     if (wcShort <= 25 && hasPostContentOverlap(normalized, ctx.postKeywords)) {
@@ -939,12 +1130,13 @@ function classifyComment(
   }
 
   // 9. Post relevance gate — short comments with zero post overlap → noise
+  // v0.1.1 Fix 8: Skip entirely on low-context posts (keyword overlap is meaningless)
   const referencesPost = hasPostContentOverlap(normalized, ctx.postKeywords);
   const asksQuestion = comment.content.includes('?');
   const wc = normalized.split(' ').filter(w => w.length > 0).length;
   const isSubstantive = wc > 20;
 
-  if (!referencesPost && ctx.postKeywords.size > 0) {
+  if (!ctx.isLowContextPost && !referencesPost && ctx.postKeywords.size > 0) {
     // Questions with zero post overlap and short → still noise (generic philosophical questions)
     if (!isSubstantive && (!asksQuestion || wc <= 25)) {
       return {
@@ -964,10 +1156,11 @@ function classifyComment(
   if (isSubstantive) signals.push('substantive_length');
 
   // Confidence varies by strength of signals
-  let signalConf = 0.50;
-  if (referencesPost) signalConf = 0.90;
+  // v0.1.1 Fix 8: Reduce confidence on low-context posts
+  let signalConf = ctx.isLowContextPost ? 0.45 : 0.50;
+  if (referencesPost && !ctx.isLowContextPost) signalConf = 0.90;
   else if (asksQuestion) signalConf = 0.85;
-  else if (isSubstantive) signalConf = 0.80;
+  else if (isSubstantive) signalConf = ctx.isLowContextPost ? 0.80 : 0.80;
 
   return {
     id: comment.id,
@@ -1066,6 +1259,16 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
   const postText = `${post.title} ${post.content}`;
   const postKeywords = extractKeywords(postText);
 
+  // v0.1.1 Fix 3: Extract $TICKER symbols from parent post title/body
+  const parentPostTickers = new Set<string>();
+  const postTickerMatches = postText.match(/\$[A-Z]{2,10}/g);
+  if (postTickerMatches) {
+    for (const t of postTickerMatches) parentPostTickers.add(t);
+  }
+
+  // v0.1.1 Fix 8: Detect low-context posts (emoji-only titles, etc.)
+  const isLowContextPost = postKeywords.size < 2;
+
   // Extract URL domains from the parent post (for self-promo widening)
   const postUrlDomains = new Set(
     extractUrlDomains(postText).map(d => d.replace(/^www\./, ''))
@@ -1087,19 +1290,37 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
     knownTemplateTexts,
     authorCommentCounts,
     postUrlDomains,
+    parentPostTickers,
+    isLowContextPost,
   };
 
   // Classify each comment
   const classifications: CommentClassification[] = [];
   for (const comment of comments) {
+    // v0.1.1 Fix 1: Step 0 — Cross-post duplicate detection
+    const commentNorm = normalizeText(comment.content);
+    const commentHash = hashText(commentNorm);
+    const crossPostResult = checkCrossPostDuplicate(
+      comment.author, commentNorm, commentHash, postId, comment.id,
+    );
+    if (crossPostResult) {
+      crossPostResult.text = comment.content; // Fill text (was left empty by helper)
+      classifications.push(crossPostResult);
+      // Still update the cross-post index
+      updateCrossPostIndex(comment.author, commentNorm, commentHash, postId, comment.id);
+      continue;
+    }
+
     const result = classifyComment(comment, ctx);
     classifications.push(result);
 
+    // Update cross-post index with this comment
+    updateCrossPostIndex(comment.author, commentNorm, commentHash, postId, comment.id);
+
     // Learn new templates: if classified as spam_template, record it
     if (result.classification === 'spam_template') {
-      const norm = normalizeText(comment.content);
-      if (norm.length > 3) {
-        db.upsertKnownTemplate(norm, now);
+      if (commentNorm.length > 3) {
+        db.upsertKnownTemplate(commentNorm, now);
       }
     }
   }
@@ -1107,12 +1328,17 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
   // ============ Post-processing passes ============
 
   // PP1: Account flooding — if one author has 3+ comments, reclassify weak-signal ones.
-  // Exempt comments with strong engagement (references post + substantive length):
-  // a long comment that directly engages with the post is real even if the author is prolific.
+  // >= 10 comments: unconditional ceiling — no exemptions, always reclassify.
+  // >= 3 and < 10: reclassify unless deep engagement (high confidence + substantive length).
   for (const cls of classifications) {
     if (cls.classification === 'signal') {
       const count = authorCommentCounts.get(cls.author.toLowerCase()) ?? 0;
-      if (count >= 3) {
+      if (count >= 10) {
+        // Absolute ceiling — no one legitimately posts 10+ comments on one post
+        cls.classification = 'spam_template';
+        cls.confidence = 0.85;
+        cls.signals = ['account_flooding_ceiling', `${count}_comments_on_post`];
+      } else if (count >= 3) {
         const wc = cls.text.split(/\s+/).length;
         const isDeepEngagement = cls.confidence >= 0.85 && wc > 30;
         if (!isDeepEngagement) {
