@@ -96,6 +96,23 @@
   .noise-bridge .full-link { font-size: 13px; color: var(--text-muted); }
   .noise-bridge .full-link a { color: var(--accent); text-decoration: none; }
   .noise-bridge .full-link a:hover { text-decoration: underline; }
+  .noise-stats { display: none; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .noise-stats-row {
+    display: flex; justify-content: center; align-items: center; gap: 16px;
+    font-size: 13px; color: var(--text-muted); flex-wrap: wrap;
+  }
+  .noise-stats-row strong { color: var(--text); }
+  .chart-toggle {
+    padding: 3px 10px; border-radius: 10px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-muted); font-size: 11px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .chart-toggle:hover { border-color: var(--text-muted); color: var(--text); }
+  .chart-chevron { font-size: 9px; transition: transform 0.2s; display: inline-block; }
+  .chart-chevron.open { transform: rotate(90deg); }
+  .landing-chart-wrap { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
+  .landing-chart-wrap.open { max-height: 280px; }
+  .landing-chart { width: 100%; height: 180px; margin-top: 12px; }
 
   .footer {
     text-align: center;
@@ -131,6 +148,17 @@
       <button onclick="analyzeNoise()">Analyze</button>
     </div>
     <div class="full-link">Full reports at <a href="/noise">sanctuary-ops.xyz/noise</a></div>
+    <div class="noise-stats" id="noiseStats">
+      <div class="noise-stats-row">
+        <span><strong id="nsPosts">-</strong> posts scanned</span>
+        <span><strong id="nsSignal">-</strong> avg signal</span>
+        <span id="nsTime"></span>
+        <button class="chart-toggle" onclick="toggleChart()"><span class="chart-chevron" id="chartChevron">&#9656;</span> Chart</button>
+      </div>
+      <div class="landing-chart-wrap" id="chartWrap">
+        <svg class="landing-chart" id="landingChart"></svg>
+      </div>
+    </div>
   </div>
 
   <div class="section-title">Products</div>
@@ -176,6 +204,93 @@ function analyzeNoise() {
 document.getElementById('noiseInput').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') analyzeNoise();
 });
+
+// ============ Live stats + benchmark chart ============
+var API = 'https://api.sanctuary-ops.xyz';
+var chartOpen = false;
+var chartLoaded = false;
+
+function toggleChart() {
+  chartOpen = !chartOpen;
+  document.getElementById('chartWrap').classList.toggle('open', chartOpen);
+  document.getElementById('chartChevron').classList.toggle('open', chartOpen);
+  if (chartOpen && !chartLoaded) loadChart();
+}
+
+(async function() {
+  try {
+    var resp = await fetch(API + '/noise/stats');
+    var json = await resp.json();
+    if (!json.success || !json.data.total_posts_analyzed) return;
+    var d = json.data;
+    document.getElementById('nsPosts').textContent = d.total_posts_analyzed;
+    document.getElementById('nsSignal').textContent = Math.round(d.avg_signal_rate * 100) + '%';
+    var t = new Date(d.last_updated);
+    var ago = Math.round((Date.now() - t.getTime()) / 60000);
+    document.getElementById('nsTime').textContent = ago < 2 ? 'just now' : ago < 60 ? ago + 'm ago' : Math.round(ago / 60) + 'h ago';
+    document.getElementById('noiseStats').style.display = 'block';
+  } catch(e) {}
+})();
+
+async function loadChart() {
+  try {
+    var resp = await fetch(API + '/noise/benchmark');
+    var json = await resp.json();
+    if (json.insufficient_data || !json.buckets || !json.buckets.length) return;
+    chartLoaded = true;
+    var buckets = json.buckets;
+    var svg = document.getElementById('landingChart');
+    var W = svg.clientWidth || 670;
+    var H = svg.clientHeight || 180;
+    var pad = { t: 16, r: 16, b: 32, l: 40 };
+    var cW = W - pad.l - pad.r;
+    var cH = H - pad.t - pad.b;
+
+    var mids = buckets.map(function(b) {
+      var lo = b.min_age_hours;
+      var hi = b.max_age_hours != null ? b.max_age_hours : lo * 2;
+      return (lo + hi) / 2;
+    });
+    var xMin = mids[0], xMax = mids[mids.length - 1];
+    var xRange = xMax - xMin || 1;
+    function xPos(h) { return pad.l + ((h - xMin) / xRange) * cW; }
+    function yPos(r) { return pad.t + (1 - r) * cH; }
+
+    var lines = '';
+    [0, 0.25, 0.5, 0.75, 1].forEach(function(r) {
+      var y = yPos(r);
+      lines += '<line x1="' + pad.l + '" y1="' + y + '" x2="' + (W - pad.r) + '" y2="' + y +
+        '" stroke="' + (r === 0 ? '#1f2231' : 'rgba(255,255,255,0.04)') + '" stroke-width="1"/>';
+      lines += '<text x="' + (pad.l - 5) + '" y="' + (y + 3) +
+        '" fill="#8b8fa3" font-size="9" text-anchor="end">' + Math.round(r * 100) + '%</text>';
+    });
+
+    var step = buckets.length > 12 ? 3 : buckets.length > 8 ? 2 : 1;
+    buckets.forEach(function(b, i) {
+      if (i > 0 && i < buckets.length - 1 && i % step !== 0) return;
+      lines += '<text x="' + xPos(mids[i]) + '" y="' + (H - 4) +
+        '" fill="#8b8fa3" font-size="9" text-anchor="middle">' + b.label + '</text>';
+    });
+
+    // Area fill
+    var first = xPos(mids[0]) + ',' + yPos(0);
+    var last = xPos(mids[mids.length - 1]) + ',' + yPos(0);
+    var areaPts = first + ' ' + buckets.map(function(b, i) { return xPos(mids[i]) + ',' + yPos(b.avg_signal_rate); }).join(' ') + ' ' + last;
+    lines += '<polygon points="' + areaPts + '" fill="rgba(34,197,94,0.08)"/>';
+
+    var pts = buckets.map(function(b, i) { return xPos(mids[i]) + ',' + yPos(b.avg_signal_rate); });
+    lines += '<polyline points="' + pts.join(' ') + '" fill="none" stroke="#22c55e" stroke-width="2" stroke-linejoin="round"/>';
+
+    buckets.forEach(function(b, i) {
+      var cx = xPos(mids[i]), cy = yPos(b.avg_signal_rate);
+      lines += '<circle cx="' + cx + '" cy="' + cy + '" r="3" fill="#22c55e" stroke="#0a0b0f" stroke-width="1.5"/>';
+      lines += '<circle cx="' + cx + '" cy="' + cy + '" r="12" fill="transparent"><title>' + b.label + ': ' +
+        Math.round(b.avg_signal_rate * 100) + '% (' + b.post_count + ' posts)</title></circle>';
+    });
+
+    svg.innerHTML = lines;
+  } catch(e) {}
+}
 </script>
 </body>
 </html>
