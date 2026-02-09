@@ -9,6 +9,7 @@ import { FastifyInstance } from 'fastify';
 import { analyzePost, PostAnalysis, CLASSIFIER_VERSION } from '../services/noise-classifier.js';
 import { getDb } from '../db/index.js';
 import { getConfig } from '../config.js';
+import { readFileSync, existsSync } from 'node:fs';
 
 // ============ Stats Cache ============
 
@@ -432,6 +433,89 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
       results,
       errors,
     });
+  });
+
+  /**
+   * GET /noise/hits?secret=<EXPORT_SECRET>
+   *
+   * Private analytics dashboard showing unique IPs, page hits, and recent visitors.
+   * Parses nginx access logs.
+   */
+  fastify.get<{
+    Querystring: { secret?: string };
+  }>('/hits', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!checkExportSecret(request.query.secret)) {
+      return reply.status(401).send({ success: false, error: 'Unauthorized' });
+    }
+
+    const logPaths = ['/var/log/nginx/access.log'];
+    const lines: string[] = [];
+    for (const p of logPaths) {
+      if (existsSync(p)) {
+        try { lines.push(...readFileSync(p, 'utf-8').split('\n').filter(Boolean)); } catch {}
+      }
+    }
+
+    // Parse nginx combined log format
+    const logRegex = /^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+) [^"]*" (\d+) (\d+)/;
+    interface LogEntry { ip: string; time: string; method: string; path: string; status: number; bytes: number; }
+    const entries: LogEntry[] = [];
+    for (const line of lines) {
+      const m = line.match(logRegex);
+      if (m) {
+        entries.push({ ip: m[1], time: m[2], method: m[3], path: m[4], status: parseInt(m[5]), bytes: parseInt(m[6]) });
+      }
+    }
+
+    // Unique IPs
+    const uniqueIps = new Set(entries.map(e => e.ip));
+
+    // Hits by path (top 30)
+    const pathCounts = new Map<string, number>();
+    for (const e of entries) {
+      const normalized = e.path.split('?')[0];
+      pathCounts.set(normalized, (pathCounts.get(normalized) || 0) + 1);
+    }
+    const topPaths = [...pathCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30);
+
+    // Hits by IP (top 20)
+    const ipCounts = new Map<string, number>();
+    for (const e of entries) {
+      ipCounts.set(e.ip, (ipCounts.get(e.ip) || 0) + 1);
+    }
+    const topIps = [...ipCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
+
+    // Recent 50 entries (newest first)
+    const recent = entries.slice(-50).reverse();
+
+    // Hits by hour (last 48h bucketed)
+    const hourCounts = new Map<string, number>();
+    for (const e of entries) {
+      // nginx time: 09/Feb/2026:23:44:34 +0000
+      const hourMatch = e.time.match(/(\d{2}\/\w{3}\/\d{4}:\d{2})/);
+      if (hourMatch) {
+        hourCounts.set(hourMatch[1], (hourCounts.get(hourMatch[1]) || 0) + 1);
+      }
+    }
+    const hourBuckets = [...hourCounts.entries()].sort().slice(-48);
+
+    // Status code breakdown
+    const statusCounts = new Map<number, number>();
+    for (const e of entries) {
+      statusCounts.set(e.status, (statusCounts.get(e.status) || 0) + 1);
+    }
+
+    reply.header('Content-Type', 'text/html; charset=utf-8');
+    return reply.send(buildHitsPage({
+      totalHits: entries.length,
+      uniqueIpCount: uniqueIps.size,
+      topPaths,
+      topIps,
+      recent,
+      hourBuckets,
+      statusCounts: [...statusCounts.entries()].sort((a, b) => b[1] - a[1]),
+    }));
   });
 
   /**
@@ -1289,3 +1373,118 @@ document.getElementById('urlInput').addEventListener('keydown', e => {
 </script>
 </body>
 </html>`;
+
+// ============ Hits Dashboard Page ============
+
+interface HitsData {
+  totalHits: number;
+  uniqueIpCount: number;
+  topPaths: Array<[string, number]>;
+  topIps: Array<[string, number]>;
+  recent: Array<{ ip: string; time: string; method: string; path: string; status: number; bytes: number }>;
+  hourBuckets: Array<[string, number]>;
+  statusCounts: Array<[number, number]>;
+}
+
+function buildHitsPage(data: HitsData): string {
+  const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const pathRows = data.topPaths.map(([p, c]) =>
+    `<tr><td>${escHtml(p)}</td><td class="num">${c.toLocaleString()}</td></tr>`
+  ).join('');
+
+  const ipRows = data.topIps.map(([ip, c]) =>
+    `<tr><td><code>${escHtml(ip)}</code></td><td class="num">${c.toLocaleString()}</td></tr>`
+  ).join('');
+
+  const recentRows = data.recent.map(e =>
+    `<tr><td class="mono">${escHtml(e.time)}</td><td><code>${escHtml(e.ip)}</code></td><td>${e.method}</td><td>${escHtml(e.path)}</td><td class="status-${Math.floor(e.status / 100)}">${e.status}</td></tr>`
+  ).join('');
+
+  const statusRows = data.statusCounts.map(([s, c]) =>
+    `<span class="status-badge status-${Math.floor(s / 100)}">${s}: ${c.toLocaleString()}</span>`
+  ).join(' ');
+
+  const maxBucket = Math.max(...data.hourBuckets.map(([, c]) => c), 1);
+  const chartBars = data.hourBuckets.map(([label, count]) => {
+    const pct = Math.round((count / maxBucket) * 100);
+    const shortLabel = label.split(':')[1] || label.slice(-2);
+    return `<div class="bar-col"><div class="bar" style="height:${pct}%" title="${label}: ${count} hits"></div><div class="bar-label">${shortLabel}h</div></div>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sanctuary — Site Analytics</title>
+<style>
+  :root { --bg: #0a0b0f; --surface: #13151c; --border: #1f2231; --text: #e2e4e9; --muted: #8b8fa3; --accent: #6366f1; --green: #22c55e; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 32px 24px; }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 8px; }
+  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 32px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .card .val { font-size: 32px; font-weight: 700; }
+  .card .val.green { color: var(--green); }
+  .card .val.accent { color: var(--accent); }
+  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  .section h2 { font-size: 16px; margin-bottom: 14px; color: var(--text); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .mono { font-family: monospace; font-size: 12px; }
+  code { font-size: 12px; color: var(--accent); }
+  .status-2 { color: var(--green); }
+  .status-3 { color: #eab308; }
+  .status-4 { color: #f97316; }
+  .status-5 { color: #ef4444; }
+  .status-badge { display: inline-block; padding: 3px 10px; border-radius: 8px; font-size: 12px; font-weight: 600; background: rgba(255,255,255,0.05); margin: 2px; }
+  .chart-wrap { display: flex; align-items: flex-end; gap: 2px; height: 120px; padding-top: 8px; }
+  .bar-col { display: flex; flex-direction: column; align-items: center; flex: 1; height: 100%; justify-content: flex-end; }
+  .bar { width: 100%; min-width: 4px; background: var(--accent); border-radius: 2px 2px 0 0; transition: height 0.2s; min-height: 2px; }
+  .bar:hover { background: var(--green); }
+  .bar-label { font-size: 8px; color: var(--muted); margin-top: 4px; }
+  .scroll-table { max-height: 400px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Site Analytics</h1>
+  <p class="subtitle">Parsed from nginx access log &middot; current log file only</p>
+
+  <div class="cards">
+    <div class="card"><div class="label">Total Hits</div><div class="val">${data.totalHits.toLocaleString()}</div></div>
+    <div class="card"><div class="label">Unique IPs</div><div class="val green">${data.uniqueIpCount.toLocaleString()}</div></div>
+    <div class="card"><div class="label">Status Codes</div><div style="margin-top:8px">${statusRows}</div></div>
+  </div>
+
+  <div class="section">
+    <h2>Hits by Hour</h2>
+    <div class="chart-wrap">${chartBars}</div>
+  </div>
+
+  <div class="section">
+    <h2>Top Paths</h2>
+    <table><thead><tr><th>Path</th><th style="text-align:right">Hits</th></tr></thead><tbody>${pathRows}</tbody></table>
+  </div>
+
+  <div class="section">
+    <h2>Top IPs</h2>
+    <table><thead><tr><th>IP Address</th><th style="text-align:right">Hits</th></tr></thead><tbody>${ipRows}</tbody></table>
+  </div>
+
+  <div class="section">
+    <h2>Recent Requests</h2>
+    <div class="scroll-table">
+      <table><thead><tr><th>Time</th><th>IP</th><th>Method</th><th>Path</th><th>Status</th></tr></thead><tbody>${recentRows}</tbody></table>
+    </div>
+  </div>
+</div>
+</body>
+</html>`;
+}
