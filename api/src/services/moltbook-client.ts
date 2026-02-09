@@ -111,6 +111,7 @@ export async function fetchMoltbookPost(postId: string): Promise<MoltbookPost | 
  * Fetch comments for a Moltbook post.
  * The Moltbook API returns up to ~100 most recent comments per request
  * and does not support pagination (page/offset/cursor params are ignored).
+ * Comments may contain nested `replies` arrays — we flatten them all.
  * Returns empty array if the API is unavailable.
  */
 export async function fetchMoltbookComments(postId: string): Promise<MoltbookComment[]> {
@@ -122,16 +123,28 @@ export async function fetchMoltbookComments(postId: string): Promise<MoltbookCom
   if (!data) return [];
 
   // Handle both { comments: [...] } and direct array responses
-  const comments = Array.isArray(data) ? data : (data.comments ?? data.data ?? []);
-  if (!Array.isArray(comments)) return [];
+  const topLevel = Array.isArray(data) ? data : (data.comments ?? data.data ?? []);
+  if (!Array.isArray(topLevel)) return [];
 
-  return comments.map((c: any) => ({
-    id: c.id ?? '',
-    author: c.author?.name ?? c.author_name ?? c.author ?? '',
-    content: c.content ?? c.body ?? c.text ?? '',
-    created_at: c.created_at ?? '',
-    parent_id: c.parent_id ?? undefined,
-  }));
+  // Recursively flatten nested replies into a single list
+  const result: MoltbookComment[] = [];
+  function flatten(items: any[]) {
+    for (const c of items) {
+      result.push({
+        id: c.id ?? '',
+        author: c.author?.name ?? c.author_name ?? c.author ?? '',
+        content: c.content ?? c.body ?? c.text ?? '',
+        created_at: c.created_at ?? '',
+        parent_id: c.parent_id ?? undefined,
+      });
+      if (Array.isArray(c.replies) && c.replies.length > 0) {
+        flatten(c.replies);
+      }
+    }
+  }
+  flatten(topLevel);
+
+  return result;
 }
 
 /**
