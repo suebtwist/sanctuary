@@ -1350,8 +1350,8 @@ function renderConcentration(data) {
   rowsEl.innerHTML = '';
   var rows = [
     { num: data.total_authors.toLocaleString(), label: 'distinct comment authors across ' + data.total_posts + ' analyzed posts', color: 'var(--text)' },
-    { num: data.heavy_spammers.toLocaleString(), label: 'heavy slop accounts (100+ comments, 0 signal)', color: 'var(--red)' },
-    { num: data.heavy_spammer_pct + '%', label: 'of all comments produced by heavy slop accounts', color: 'var(--orange)' }
+    { num: data.heavy_spammers.toLocaleString(), label: 'SlopFathers (100+ comments, 0 signal)', color: 'var(--red)' },
+    { num: data.heavy_spammer_pct + '%', label: 'of all comments produced by SlopFathers', color: 'var(--orange)' }
   ];
 
   for (var i = 0; i < rows.length; i++) {
