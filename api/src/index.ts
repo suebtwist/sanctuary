@@ -224,16 +224,21 @@ async function main() {
     }, 24 * 60 * 60 * 1000);
 
     // Background rescan: rescan stale posts every 2 hours
-    setInterval(async () => {
-      try {
-        const result = await rescanOldPosts();
-        if (result.rescanned > 0) {
-          fastify.log.info(result, 'Stale post rescan completed');
+    // Delay first run by 6 hours to let initial scan finish
+    setTimeout(() => {
+      const runRescan = async () => {
+        try {
+          const result = await rescanOldPosts();
+          if (result.rescanned > 0) {
+            fastify.log.info(result, 'Stale post rescan completed');
+          }
+        } catch (err) {
+          fastify.log.error(err, 'Failed to rescan stale posts');
         }
-      } catch (err) {
-        fastify.log.error(err, 'Failed to rescan stale posts');
-      }
-    }, 2 * 60 * 60 * 1000);
+      };
+      runRescan();
+      setInterval(runRescan, 2 * 60 * 60 * 1000);
+    }, 6 * 60 * 60 * 1000);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
