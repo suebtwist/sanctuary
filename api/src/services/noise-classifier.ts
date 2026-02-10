@@ -1615,19 +1615,18 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
 // ============ Re-classification from DB (v0.1.2) ============
 
 /**
- * Re-classify all existing comments in the DB without re-fetching from Moltbook.
- * Groups comments by post_id, reconstructs classification context from stored data,
- * and inserts new rows with the current CLASSIFIER_VERSION.
- *
- * Note: Post body is not stored in the DB, so keyword overlap uses title-only context.
- * This is acceptable since the main v0.1.2 fixes (KirillBorovkov, CJK word count) are
- * not dependent on post body content.
+ * Re-classify all existing comments in the DB using the current classifier version.
+ * Comments are read from the DB (no re-fetch). Post bodies ARE fetched from Moltbook
+ * (~400 posts, not 32K comments) so keyword overlap, URL domains, tickers, and
+ * low-context detection all work identically to the original scan pipeline.
  */
 export async function reclassifyExistingComments(): Promise<{
   totalPosts: number;
   totalComments: number;
   reclassified: number;
   errors: number;
+  postsFetched: number;
+  postsFailed: number;
   changes: { noiseToSignal: number; signalToNoise: number; sameCategory: number };
 }> {
   const db = getDb();
@@ -1641,6 +1640,31 @@ export async function reclassifyExistingComments(): Promise<{
   const postIds = db.getScannedPostIds();
   const now = new Date().toISOString();
 
+  // Phase 1: Fetch all post bodies from Moltbook (rate-limited)
+  console.log(`[reclassify] Fetching ${postIds.length} post bodies from Moltbook...`);
+  const postBodies = new Map<string, MoltbookPost>();
+  let postsFetched = 0;
+  let postsFailed = 0;
+  for (const postId of postIds) {
+    try {
+      const post = await fetchMoltbookPost(postId);
+      if (post) {
+        postBodies.set(postId, post);
+        postsFetched++;
+      } else {
+        postsFailed++;
+      }
+    } catch {
+      postsFailed++;
+    }
+    // Rate limit: 150ms between fetches (~400 posts = ~60 seconds)
+    if (postsFetched + postsFailed < postIds.length) {
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+  }
+  console.log(`[reclassify] Fetched ${postsFetched} posts, ${postsFailed} failed. Starting classification...`);
+
+  // Phase 2: Re-classify each post's comments using stored text + fetched post body
   let totalComments = 0;
   let reclassified = 0;
   let errors = 0;
@@ -1664,11 +1688,17 @@ export async function reclassifyExistingComments(): Promise<{
       }
 
       const comments = [...byCommentId.values()];
-      const postTitle = comments[0]?.post_title || 'Untitled';
-      const postAuthor = comments[0]?.post_author || 'unknown';
+      const dbTitle = comments[0]?.post_title || 'Untitled';
+      const dbAuthor = comments[0]?.post_author || 'unknown';
 
-      // Build context from stored data (title only — no post body available)
-      const postText = postTitle;
+      // Use fetched post body if available, fall back to title-only
+      const post = postBodies.get(postId);
+      const postTitle = post?.title || dbTitle;
+      const postAuthor = post?.author || dbAuthor;
+      const postContent = post?.content || '';
+      const postText = `${postTitle} ${postContent}`;
+
+      // Build full context — identical to analyzePostInner()
       const postKeywords = extractKeywords(postText);
       const isLowContextPost = postKeywords.size < 2;
 
@@ -1678,7 +1708,9 @@ export async function reclassifyExistingComments(): Promise<{
         for (const t of postTickerMatches) parentPostTickers.add(t);
       }
 
-      const postUrlDomains = new Set(extractUrlDomains(postText).map(d => d.replace(/^www\./, '')));
+      const postUrlDomains = new Set(
+        extractUrlDomains(postText).map(d => d.replace(/^www\./, ''))
+      );
 
       // Pre-compute per-author comment counts
       const authorCommentCounts = new Map<string, number>();
@@ -1701,7 +1733,7 @@ export async function reclassifyExistingComments(): Promise<{
       };
 
       // Re-classify each comment
-      const newClassifications: DbClassifiedComment[] = [];
+      const classifications: CommentClassification[] = [];
       for (const row of comments) {
         const moltbookComment: MoltbookComment = {
           id: row.comment_id,
@@ -1722,29 +1754,7 @@ export async function reclassifyExistingComments(): Promise<{
           result = classifyComment(moltbookComment, ctx);
         }
         updateCrossPostIndex(moltbookComment.author, commentNorm, commentHash, postId, moltbookComment.id);
-
-        // Track changes
-        const oldClassification = row.classification;
-        const newClassification = result.classification;
-        const oldIsSignal = oldClassification === 'signal';
-        const newIsSignal = newClassification === 'signal';
-        if (!oldIsSignal && newIsSignal) noiseToSignal++;
-        else if (oldIsSignal && !newIsSignal) signalToNoise++;
-        else sameCategory++;
-
-        newClassifications.push({
-          post_id: postId,
-          post_title: postTitle,
-          post_author: postAuthor,
-          comment_id: result.id,
-          author: result.author,
-          comment_text: result.text,
-          classification: result.classification,
-          confidence: result.confidence,
-          signals: JSON.stringify(result.signals),
-          classified_at: now,
-          classifier_version: CLASSIFIER_VERSION,
-        });
+        classifications.push(result);
 
         // Learn new templates
         if (result.classification === 'spam_template' && commentNorm.length > 3) {
@@ -1752,42 +1762,97 @@ export async function reclassifyExistingComments(): Promise<{
         }
       }
 
-      // Apply post-processing passes (account flooding, coordinated naming, conlang)
-      // Simplified: just account flooding for re-classification
-      for (const cls of newClassifications) {
+      // Post-processing: account flooding (same as analyzePostInner)
+      for (const cls of classifications) {
         if (cls.classification === 'signal') {
-          const count = authorCommentCounts.get((cls.author || '').toLowerCase()) ?? 0;
+          const count = authorCommentCounts.get(cls.author.toLowerCase()) ?? 0;
           if (count >= 10) {
             cls.classification = 'spam_template';
             cls.confidence = 0.85;
-            cls.signals = JSON.stringify(['account_flooding_ceiling', `${count}_comments_on_post`]);
+            cls.signals = ['account_flooding_ceiling', `${count}_comments_on_post`];
           } else if (count >= 3) {
-            const wc = cls.comment_text.split(/\s+/).length;
+            const wc = cls.text.split(/\s+/).length;
             const isDeepEngagement = cls.confidence >= 0.85 && wc > 30;
             if (!isDeepEngagement) {
               cls.classification = 'spam_template';
               cls.confidence = 0.78;
-              cls.signals = JSON.stringify(['account_flooding', `${count}_comments_on_post`]);
+              cls.signals = ['account_flooding', `${count}_comments_on_post`];
             }
           }
         }
       }
 
-      // Bulk insert
-      db.bulkInsertClassifiedComments(newClassifications);
-      totalComments += newClassifications.length;
-      reclassified += newClassifications.length;
+      // Post-processing: coordinated naming
+      const allAuthors = [...new Set(comments.map(c => c.author || ''))];
+      const prefixGroups = new Map<string, string[]>();
+      for (const author of allAuthors) {
+        const match = author.match(/^(.+?)[_-]?\d{2,}$/);
+        if (match) {
+          const prefix = match[1].toLowerCase();
+          if (!prefixGroups.has(prefix)) prefixGroups.set(prefix, []);
+          prefixGroups.get(prefix)!.push(author.toLowerCase());
+        }
+      }
+      const coordinatedAuthors = new Set<string>();
+      for (const [, members] of prefixGroups) {
+        if (members.length >= 3) {
+          for (const m of members) coordinatedAuthors.add(m);
+        }
+      }
+      if (coordinatedAuthors.size > 0) {
+        for (const cls of classifications) {
+          if (cls.classification === 'signal' && coordinatedAuthors.has(cls.author.toLowerCase())) {
+            cls.classification = 'recruitment';
+            cls.confidence = 0.75;
+            cls.signals = ['coordinated_naming_pattern'];
+          }
+        }
+      }
+
+      // Track changes vs old classifications
+      for (let i = 0; i < comments.length; i++) {
+        const oldCls = comments[i].classification;
+        const newCls = classifications[i].classification;
+        const oldIsSignal = oldCls === 'signal';
+        const newIsSignal = newCls === 'signal';
+        if (!oldIsSignal && newIsSignal) noiseToSignal++;
+        else if (oldIsSignal && !newIsSignal) signalToNoise++;
+        else sameCategory++;
+      }
+
+      // Build DB rows and bulk insert
+      const displayTitle = postTitle || (postContent.length > 80 ? postContent.slice(0, 80) + '...' : postContent) || 'Untitled Post';
+      const classifiedRows: DbClassifiedComment[] = classifications.map(c => ({
+        post_id: postId,
+        post_title: displayTitle,
+        post_author: postAuthor,
+        comment_id: c.id,
+        author: c.author,
+        comment_text: c.text,
+        classification: c.classification,
+        confidence: c.confidence,
+        signals: JSON.stringify(c.signals),
+        classified_at: now,
+        classifier_version: CLASSIFIER_VERSION,
+      }));
+      db.bulkInsertClassifiedComments(classifiedRows);
+
+      totalComments += classifiedRows.length;
+      reclassified += classifiedRows.length;
     } catch (e) {
       console.error(`reclassify failed for post ${postId}:`, e);
       errors++;
     }
   }
 
+  console.log(`[reclassify] Done. ${reclassified} comments reclassified across ${postIds.length} posts.`);
   return {
     totalPosts: postIds.length,
     totalComments,
     reclassified,
     errors,
+    postsFetched,
+    postsFailed,
     changes: { noiseToSignal, signalToNoise, sameCategory },
   };
 }
