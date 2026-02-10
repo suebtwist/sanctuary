@@ -19,6 +19,7 @@ import { backupRoutes } from './routes/backups.js';
 import { attestationRoutes } from './routes/attestations.js';
 import { statsRoutes } from './routes/stats.js';
 import { noiseRoutes } from './routes/noise.js';
+import { scoreRoutes } from './routes/score.js';
 import { detectFallenAgents } from './services/trust-calculator.js';
 
 async function main() {
@@ -126,6 +127,7 @@ async function main() {
   await fastify.register(attestationRoutes, { prefix: '/attestations' });
   await fastify.register(statsRoutes, { prefix: '/stats' });
   await fastify.register(noiseRoutes, { prefix: '/noise' });
+  await fastify.register(scoreRoutes, { prefix: '/score' });
 
   // Graceful shutdown
   const shutdown = async () => {

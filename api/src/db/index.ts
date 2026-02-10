@@ -1086,6 +1086,137 @@ CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
     });
   }
 
+  // ============ Agent Leaderboard / MoltScore ============
+
+  /**
+   * Get top agents by signal rate for leaderboard.
+   * Filters by minimum comment count and minimum distinct post count.
+   */
+  getAgentLeaderboard(limit: number = 100, minComments: number = 10, minPosts: number = 3): Array<{
+    author: string; signal_count: number; total_comments: number;
+    signal_rate: number; post_count: number;
+  }> {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return [];
+
+    return this.db.prepare(`
+      SELECT author,
+        SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) as signal_count,
+        COUNT(*) as total_comments,
+        CAST(SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as signal_rate,
+        COUNT(DISTINCT post_id) as post_count
+      FROM classified_comments
+      WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+      GROUP BY author
+      HAVING COUNT(*) >= ? AND COUNT(DISTINCT post_id) >= ?
+      ORDER BY signal_rate DESC
+      LIMIT ?
+    `).all(latestVersion, minComments, minPosts, limit) as Array<{
+      author: string; signal_count: number; total_comments: number;
+      signal_rate: number; post_count: number;
+    }>;
+  }
+
+  /**
+   * Count agents qualifying for leaderboard.
+   */
+  getQualifyingAgentCount(minComments: number = 10, minPosts: number = 3): number {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return 0;
+
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as c FROM (
+        SELECT author
+        FROM classified_comments
+        WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+        GROUP BY author
+        HAVING COUNT(*) >= ? AND COUNT(DISTINCT post_id) >= ?
+      )
+    `).get(latestVersion, minComments, minPosts) as { c: number };
+    return row.c;
+  }
+
+  /**
+   * Get individual agent stats for MoltScore lookup.
+   */
+  getAgentStats(agentName: string): {
+    author: string; signal_count: number; total_comments: number;
+    signal_rate: number; post_count: number;
+    by_classification: Record<string, number>;
+  } | null {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return null;
+
+    const row = this.db.prepare(`
+      SELECT author,
+        SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) as signal_count,
+        COUNT(*) as total_comments,
+        CAST(SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as signal_rate,
+        COUNT(DISTINCT post_id) as post_count
+      FROM classified_comments
+      WHERE classifier_version = ? AND author = ?
+      GROUP BY author
+    `).get(latestVersion, agentName) as {
+      author: string; signal_count: number; total_comments: number;
+      signal_rate: number; post_count: number;
+    } | undefined;
+
+    if (!row) return null;
+
+    // Get classification breakdown
+    const clsRows = this.db.prepare(`
+      SELECT classification, COUNT(*) as c
+      FROM classified_comments
+      WHERE classifier_version = ? AND author = ?
+      GROUP BY classification
+    `).all(latestVersion, agentName) as Array<{ classification: string; c: number }>;
+
+    const by_classification: Record<string, number> = {};
+    for (const r of clsRows) by_classification[r.classification] = r.c;
+
+    return { ...row, by_classification };
+  }
+
+  /**
+   * Get per-post signal breakdown for an agent.
+   */
+  getAgentPostBreakdown(agentName: string, limit: number = 10): Array<{
+    post_id: string; post_title: string; total: number;
+    signal_count: number; signal_rate: number;
+  }> {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return [];
+
+    return this.db.prepare(`
+      SELECT post_id, post_title,
+        COUNT(*) as total,
+        SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) as signal_count,
+        CAST(SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as signal_rate
+      FROM classified_comments
+      WHERE classifier_version = ? AND author = ?
+      GROUP BY post_id
+      ORDER BY classified_at DESC
+      LIMIT ?
+    `).all(latestVersion, agentName, limit) as Array<{
+      post_id: string; post_title: string; total: number;
+      signal_count: number; signal_rate: number;
+    }>;
+  }
+
+  /**
+   * Get all distinct agent names (for autocomplete).
+   */
+  getDistinctAgentNames(): string[] {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return [];
+
+    return (this.db.prepare(`
+      SELECT DISTINCT author FROM classified_comments
+      WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+      ORDER BY author
+    `).all(latestVersion) as Array<{ author: string }>).map(r => r.author);
+  }
+
   // ============ Chart Data ============
 
   /**

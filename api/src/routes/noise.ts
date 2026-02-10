@@ -10,6 +10,7 @@ import { analyzePost, PostAnalysis, CLASSIFIER_VERSION } from '../services/noise
 import { getDb } from '../db/index.js';
 import { getConfig } from '../config.js';
 import { readFileSync, existsSync } from 'node:fs';
+import { getSidebarCSS, getSidebarHTML, getSidebarJS } from './score.js';
 
 // ============ Stats Cache ============
 
@@ -552,7 +553,13 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
    */
   fastify.get('/page', async (_request, reply) => {
     reply.header('Content-Type', 'text/html; charset=utf-8');
-    return reply.send(NOISE_PAGE_HTML);
+    // Inject sidebar into the noise page
+    let html = NOISE_PAGE_HTML;
+    html = html.replace('</style>', getSidebarCSS() + '\n</style>');
+    html = html.replace('<body>\n<div class="container">', '<body>\n' + getSidebarHTML('noise') + '\n<div class="page-content">\n<div class="container">');
+    html = html.replace('</div>\n\n<script>', '</div>\n</div>\n\n<script>');
+    html = html.replace('</script>\n</body>', getSidebarJS() + '\n</script>\n</body>');
+    return reply.send(html);
   });
 }
 
