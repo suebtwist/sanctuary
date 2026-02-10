@@ -147,6 +147,18 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
+   * GET /noise/scanned-ids
+   *
+   * Returns list of post IDs already in classified_comments (for dedup during bulk imports).
+   */
+  fastify.get('/scanned-ids', async (_request, reply) => {
+    reply.header('Cache-Control', 'public, max-age=60');
+    const db = getDb();
+    const ids = db.getScannedPostIds();
+    return reply.send({ success: true, count: ids.length, post_ids: ids });
+  });
+
+  /**
    * GET /noise/charts
    *
    * Data for aggregate charts: age-bucketed classification + spam concentration.

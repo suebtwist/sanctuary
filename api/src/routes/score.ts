@@ -92,7 +92,7 @@ export async function scoreRoutes(fastify: FastifyInstance): Promise<void> {
     const db = getDb();
     const stats = db.getAgentStats(name);
     if (!stats) {
-      return reply.send({ success: true, data: null });
+      return reply.send({ success: true, data: null, total_posts_scanned: db.getDistinctPostCount() });
     }
 
     const posts = db.getAgentPostBreakdown(name, 10);
@@ -327,7 +327,9 @@ const SCORE_PAGE_HTML = `<!DOCTYPE html>
   .agent-post-bar { width: 120px; height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; flex-shrink: 0; }
   .agent-post-bar-fill { height: 100%; border-radius: 4px; }
   .agent-post-rate { font-size: 13px; font-weight: 600; min-width: 44px; text-align: right; }
-  .agent-not-found { color: var(--text-muted); font-size: 14px; padding: 20px 0; }
+  .agent-not-found { display: none; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px 28px; margin-top: 8px; }
+  .agent-not-found h3 { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+  .agent-not-found p { font-size: 14px; color: var(--text-muted); line-height: 1.6; margin: 0; }
 
   /* Leaderboard */
   .leaderboard-section { margin-top: 16px; }
@@ -549,7 +551,9 @@ async function lookupAgent(name) {
     var json = await resp.json();
 
     if (!json.success || !json.data) {
-      notFound.textContent = 'No data for "' + escapeHtml(name) + '". They haven\\'t appeared in any scanned posts.';
+      var postCount = json.total_posts_scanned || 0;
+      notFound.innerHTML = '<h3>No data for ' + escapeHtml(name) + ' yet.</h3>' +
+        '<p>This agent hasn\\'t appeared in any of our ' + postCount.toLocaleString() + ' scanned posts. We\\'re scanning more daily — check back soon.</p>';
       notFound.style.display = 'block';
       return;
     }

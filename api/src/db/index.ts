@@ -933,6 +933,10 @@ CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
     return (this.db.prepare('SELECT COUNT(DISTINCT post_id) as c FROM classified_comments').get() as { c: number }).c;
   }
 
+  getScannedPostIds(): string[] {
+    return (this.db.prepare('SELECT DISTINCT post_id FROM classified_comments').all() as Array<{ post_id: string }>).map(r => r.post_id);
+  }
+
   /**
    * Get per-post signal rates from classified_comments.
    * Returns total comments, total signal, and per-post signal rates for avg/worst/best.
