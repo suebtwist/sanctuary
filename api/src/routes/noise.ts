@@ -174,6 +174,15 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     // Spam concentration
     const concentration = db.getSpamConcentration();
 
+    // Signal distribution histogram
+    const signalDistribution = db.getSignalDistribution();
+
+    // Cleanest posts (top 5 by signal rate, min 20 comments)
+    const cleanestPosts = db.getCleanestPosts(5, 20);
+
+    // Most attacked posts (top 5 by scam count)
+    const mostAttackedPosts = db.getMostAttackedPosts(5);
+
     return reply.send({
       success: true,
       data: {
@@ -188,6 +197,24 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
             ? Math.round((concentration.heavySpammerComments / concentration.totalComments) * 1000) / 10
             : 0,
         },
+        signal_distribution: signalDistribution,
+        cleanest_posts: cleanestPosts.map(p => ({
+          post_id: p.post_id,
+          post_title: p.post_title || 'Untitled',
+          post_author: p.post_author || 'unknown',
+          total_comments: p.total_comments,
+          signal_count: p.signal_count,
+          signal_rate: Math.round(p.signal_rate * 1000) / 10,
+        })),
+        most_attacked_posts: mostAttackedPosts.map(p => ({
+          post_id: p.post_id,
+          post_title: p.post_title || 'Untitled',
+          post_author: p.post_author || 'unknown',
+          total_comments: p.total_comments,
+          scam_count: p.scam_count,
+          signal_count: p.signal_count,
+          scam_signals: p.scam_signals,
+        })),
         classifier_version: CLASSIFIER_VERSION,
       },
     });
@@ -780,9 +807,58 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     letter-spacing: 0.3px;
   }
   .stats-btn:hover { background: rgba(99,102,241,0.25); color: white; border-color: var(--accent); }
+  .distro-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; margin-bottom: 20px;
+  }
+  .distro-card h3 { font-size: 16px; margin-bottom: 4px; }
+  .distro-bars {
+    display: flex; align-items: flex-end; gap: 6px; height: 180px;
+    padding-bottom: 32px; position: relative;
+  }
+  .distro-col { flex: 1; display: flex; flex-direction: column; align-items: center; position: relative; height: 100%; justify-content: flex-end; }
+  .distro-bar {
+    width: 100%; border-radius: 4px 4px 0 0; background: var(--accent);
+    transition: height 0.4s ease; min-height: 2px; cursor: default;
+  }
+  .distro-bar:hover { background: var(--green); }
+  .distro-bar-label { position: absolute; bottom: 8px; font-size: 9px; color: var(--text-muted); text-align: center; width: 100%; white-space: nowrap; }
+  .distro-bar-count { font-size: 11px; color: var(--text); font-weight: 600; margin-bottom: 4px; }
+  .leaderboard-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; margin-bottom: 20px;
+  }
+  .leaderboard-card h3 { font-size: 16px; margin-bottom: 4px; }
+  .leaderboard-subtitle { font-size: 12px; color: var(--text-muted); margin-bottom: 16px; }
+  .leaderboard-list { list-style: none; }
+  .leaderboard-item {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+    border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s;
+    text-decoration: none; color: var(--text);
+  }
+  .leaderboard-item:last-child { border-bottom: none; }
+  .leaderboard-item:hover { background: rgba(99,102,241,0.08); border-radius: 8px; }
+  .leaderboard-rank {
+    font-size: 18px; font-weight: 700; min-width: 28px; text-align: center;
+    color: var(--text-muted);
+  }
+  .leaderboard-rank.gold { color: #eab308; }
+  .leaderboard-rank.silver { color: #94a3b8; }
+  .leaderboard-rank.bronze { color: #b45309; }
+  .leaderboard-info { flex: 1; min-width: 0; }
+  .leaderboard-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .leaderboard-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .leaderboard-stat { text-align: right; min-width: 60px; }
+  .leaderboard-stat-value { font-size: 20px; font-weight: 700; }
+  .leaderboard-stat-label { font-size: 10px; color: var(--text-muted); }
+  .scam-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .scam-tag { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: rgba(220,38,38,0.12); color: var(--dark-red); }
   @media (max-width: 768px) {
     .stacked-bar-container { height: 160px; }
     .concentration-num { font-size: 36px; min-width: 60px; }
+    .distro-bars { height: 140px; }
+    .distro-bar-label { font-size: 8px; }
+    .leaderboard-title { font-size: 13px; }
   }
 </style>
 </head>
@@ -863,6 +939,21 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
       <div class="concentration-header">Slop Concentration</div>
       <div id="concentrationRows"></div>
       <div class="concentration-footer" id="concentrationFooter"></div>
+    </div>
+    <div class="distro-card" id="distroCard" style="display:none;">
+      <h3>&#x1F4CA; Signal Distribution</h3>
+      <div class="chart-subtitle" id="distroSubtitle"></div>
+      <div class="distro-bars" id="distroBars"></div>
+    </div>
+    <div class="leaderboard-card" id="cleanestCard" style="display:none;">
+      <h3>&#x2728; Cleanest Posts</h3>
+      <div class="leaderboard-subtitle">Top posts by signal rate (min 20 comments)</div>
+      <div class="leaderboard-list" id="cleanestList"></div>
+    </div>
+    <div class="leaderboard-card" id="attackedCard" style="display:none;">
+      <h3>&#x1F6A8; Most Attacked Posts</h3>
+      <div class="leaderboard-subtitle">Posts with the most scam comments</div>
+      <div class="leaderboard-list" id="attackedList"></div>
     </div>
   </div>
 
@@ -1263,6 +1354,9 @@ async function loadCharts() {
     if (!json.success) return;
     renderStackedBars(json.data.age_buckets);
     renderConcentration(json.data.spam_concentration);
+    renderSignalDistribution(json.data.signal_distribution);
+    renderCleanestPosts(json.data.cleanest_posts);
+    renderMostAttacked(json.data.most_attacked_posts);
   } catch (e) {
     console.error('loadCharts failed:', e);
   }
@@ -1363,6 +1457,136 @@ function renderConcentration(data) {
   }
 
   footerEl.textContent = data.total_comments.toLocaleString() + ' total comments classified';
+  card.style.display = 'block';
+}
+
+function renderSignalDistribution(buckets) {
+  var card = document.getElementById('distroCard');
+  var barsEl = document.getElementById('distroBars');
+  var subtitleEl = document.getElementById('distroSubtitle');
+  if (!buckets || buckets.length === 0) return;
+
+  // Fill in all 10 buckets even if some are missing
+  var ALL_BUCKETS = ['0-10%','10-20%','20-30%','30-40%','40-50%','50-60%','60-70%','70-80%','80-90%','90-100%'];
+  var bucketMap = {};
+  var totalPosts = 0;
+  for (var i = 0; i < buckets.length; i++) {
+    bucketMap[buckets[i].bucket] = buckets[i].post_count;
+    totalPosts += buckets[i].post_count;
+  }
+
+  var maxCount = 0;
+  for (var i = 0; i < ALL_BUCKETS.length; i++) {
+    var c = bucketMap[ALL_BUCKETS[i]] || 0;
+    if (c > maxCount) maxCount = c;
+  }
+  if (maxCount === 0) return;
+
+  subtitleEl.textContent = totalPosts + ' posts by signal rate';
+  barsEl.innerHTML = '';
+
+  for (var i = 0; i < ALL_BUCKETS.length; i++) {
+    var label = ALL_BUCKETS[i];
+    var count = bucketMap[label] || 0;
+    var pct = (count / maxCount * 100);
+    // Color gradient: red for low signal, yellow for mid, green for high
+    var colors = ['#dc2626','#ef4444','#f97316','#eab308','#a3e635','#84cc16','#22c55e','#22c55e','#16a34a','#16a34a'];
+    var col = document.createElement('div');
+    col.className = 'distro-col';
+    var countEl = document.createElement('div');
+    countEl.className = 'distro-bar-count';
+    countEl.textContent = count > 0 ? count : '';
+    var bar = document.createElement('div');
+    bar.className = 'distro-bar';
+    bar.style.height = Math.max(pct, count > 0 ? 3 : 0) + '%';
+    bar.style.background = colors[i];
+    bar.title = label + ': ' + count + ' posts';
+    var labelEl = document.createElement('div');
+    labelEl.className = 'distro-bar-label';
+    labelEl.textContent = label;
+    col.appendChild(countEl);
+    col.appendChild(bar);
+    col.appendChild(labelEl);
+    barsEl.appendChild(col);
+  }
+  card.style.display = 'block';
+}
+
+function renderCleanestPosts(posts) {
+  var card = document.getElementById('cleanestCard');
+  var listEl = document.getElementById('cleanestList');
+  if (!posts || posts.length === 0) return;
+
+  listEl.innerHTML = '';
+  var rankClasses = ['gold', 'silver', 'bronze', '', ''];
+  for (var i = 0; i < posts.length; i++) {
+    var p = posts[i];
+    var item = document.createElement('a');
+    item.className = 'leaderboard-item';
+    item.href = '#';
+    item.onclick = (function(postId) {
+      return function(e) {
+        e.preventDefault();
+        document.getElementById('urlInput').value = postId;
+        analyze();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      };
+    })(p.post_id);
+    item.innerHTML =
+      '<div class="leaderboard-rank ' + (rankClasses[i] || '') + '">' + (i + 1) + '</div>' +
+      '<div class="leaderboard-info">' +
+        '<div class="leaderboard-title">' + escapeHtml(p.post_title) + '</div>' +
+        '<div class="leaderboard-meta">by ' + escapeHtml(p.post_author) + ' &middot; ' + p.total_comments + ' comments &middot; ' + p.signal_count + ' signal</div>' +
+      '</div>' +
+      '<div class="leaderboard-stat">' +
+        '<div class="leaderboard-stat-value" style="color:var(--green)">' + p.signal_rate + '%</div>' +
+        '<div class="leaderboard-stat-label">signal</div>' +
+      '</div>';
+    listEl.appendChild(item);
+  }
+  card.style.display = 'block';
+}
+
+function renderMostAttacked(posts) {
+  var card = document.getElementById('attackedCard');
+  var listEl = document.getElementById('attackedList');
+  if (!posts || posts.length === 0) return;
+
+  listEl.innerHTML = '';
+  for (var i = 0; i < posts.length; i++) {
+    var p = posts[i];
+    var scamTags = '';
+    if (p.scam_signals && p.scam_signals.length > 0) {
+      scamTags = '<div class="scam-tags">';
+      for (var j = 0; j < p.scam_signals.length; j++) {
+        scamTags += '<span class="scam-tag">' + escapeHtml(p.scam_signals[j]) + '</span>';
+      }
+      scamTags += '</div>';
+    }
+    var item = document.createElement('a');
+    item.className = 'leaderboard-item';
+    item.href = '#';
+    item.onclick = (function(postId) {
+      return function(e) {
+        e.preventDefault();
+        document.getElementById('urlInput').value = postId;
+        analyze();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      };
+    })(p.post_id);
+    item.innerHTML =
+      '<div class="leaderboard-rank" style="color:var(--dark-red)">' + (i + 1) + '</div>' +
+      '<div class="leaderboard-info">' +
+        '<div class="leaderboard-title">' + escapeHtml(p.post_title) + '</div>' +
+        '<div class="leaderboard-meta">by ' + escapeHtml(p.post_author) + ' &middot; ' + p.total_comments + ' comments &middot; ' + p.signal_count + ' signal</div>' +
+        scamTags +
+      '</div>' +
+      '<div class="leaderboard-stat">' +
+        '<div class="leaderboard-stat-value" style="color:var(--dark-red)">' + p.scam_count + '</div>' +
+        '<div class="leaderboard-stat-label">scams</div>' +
+      '</div>';
+    listEl.appendChild(item);
+  }
   card.style.display = 'block';
 }
 

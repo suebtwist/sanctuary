@@ -970,6 +970,122 @@ CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
     return (this.db.prepare('SELECT post_id FROM scan_stats').all() as Array<{ post_id: string }>).map(r => r.post_id);
   }
 
+  // ============ Leaderboard / Distribution Queries ============
+
+  /**
+   * Get signal rate distribution: how many posts fall into each 10% bucket.
+   */
+  getSignalDistribution(): Array<{ bucket: string; post_count: number }> {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return [];
+
+    const rows = this.db.prepare(`
+      SELECT
+        CASE
+          WHEN signal_rate < 0.1 THEN '0-10%'
+          WHEN signal_rate < 0.2 THEN '10-20%'
+          WHEN signal_rate < 0.3 THEN '20-30%'
+          WHEN signal_rate < 0.4 THEN '30-40%'
+          WHEN signal_rate < 0.5 THEN '40-50%'
+          WHEN signal_rate < 0.6 THEN '50-60%'
+          WHEN signal_rate < 0.7 THEN '60-70%'
+          WHEN signal_rate < 0.8 THEN '70-80%'
+          WHEN signal_rate < 0.9 THEN '80-90%'
+          ELSE '90-100%'
+        END as bucket,
+        COUNT(*) as post_count
+      FROM (
+        SELECT post_id,
+          CAST(SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as signal_rate
+        FROM classified_comments
+        WHERE classifier_version = ?
+        GROUP BY post_id
+      )
+      GROUP BY bucket
+      ORDER BY bucket
+    `).all(latestVersion) as Array<{ bucket: string; post_count: number }>;
+
+    return rows;
+  }
+
+  /**
+   * Get cleanest posts: top N by signal rate, minimum comment threshold.
+   */
+  getCleanestPosts(limit: number = 5, minComments: number = 20): Array<{
+    post_id: string; post_title: string; post_author: string;
+    total_comments: number; signal_count: number; signal_rate: number;
+  }> {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return [];
+
+    return this.db.prepare(`
+      SELECT post_id, post_title, post_author,
+        COUNT(*) as total_comments,
+        SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) as signal_count,
+        CAST(SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as signal_rate
+      FROM classified_comments
+      WHERE classifier_version = ?
+      GROUP BY post_id
+      HAVING COUNT(*) >= ?
+      ORDER BY signal_rate DESC
+      LIMIT ?
+    `).all(latestVersion, minComments, limit) as Array<{
+      post_id: string; post_title: string; post_author: string;
+      total_comments: number; signal_count: number; signal_rate: number;
+    }>;
+  }
+
+  /**
+   * Get most attacked posts: top N by scam comment count, minimum 1 scam.
+   */
+  getMostAttackedPosts(limit: number = 5): Array<{
+    post_id: string; post_title: string; post_author: string;
+    total_comments: number; scam_count: number; signal_count: number;
+    scam_signals: string[];
+  }> {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return [];
+
+    const posts = this.db.prepare(`
+      SELECT post_id, post_title, post_author,
+        COUNT(*) as total_comments,
+        SUM(CASE WHEN classification = 'scam' THEN 1 ELSE 0 END) as scam_count,
+        SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) as signal_count
+      FROM classified_comments
+      WHERE classifier_version = ?
+      GROUP BY post_id
+      HAVING SUM(CASE WHEN classification = 'scam' THEN 1 ELSE 0 END) >= 1
+      ORDER BY scam_count DESC
+      LIMIT ?
+    `).all(latestVersion, limit) as Array<{
+      post_id: string; post_title: string; post_author: string;
+      total_comments: number; scam_count: number; signal_count: number;
+    }>;
+
+    // Fetch sample scam signals for each post
+    return posts.map(p => {
+      const scamRows = this.db.prepare(`
+        SELECT signals FROM classified_comments
+        WHERE post_id = ? AND classifier_version = ? AND classification = 'scam'
+        LIMIT 3
+      `).all(p.post_id, latestVersion) as Array<{ signals: string }>;
+
+      const scam_signals: string[] = [];
+      for (const row of scamRows) {
+        try {
+          const parsed = JSON.parse(row.signals);
+          if (Array.isArray(parsed)) {
+            for (const s of parsed) {
+              if (typeof s === 'string' && !scam_signals.includes(s)) scam_signals.push(s);
+            }
+          }
+        } catch {}
+      }
+
+      return { ...p, scam_signals: scam_signals.slice(0, 5) };
+    });
+  }
+
   // ============ Chart Data ============
 
   /**
