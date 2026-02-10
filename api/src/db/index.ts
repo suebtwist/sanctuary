@@ -120,6 +120,7 @@ export interface DbScanStats {
   noise_count: number;
   signal_rate: number;
   categories: string; // JSON string
+  post_body?: string;
 }
 
 export interface DbClassifiedComment {
@@ -342,6 +343,12 @@ CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
     // Add recall_pub_key column to agents table
     if (!agentCols.some(c => c.name === 'recall_pub_key')) {
       this.db.exec('ALTER TABLE agents ADD COLUMN recall_pub_key TEXT');
+    }
+
+    // Add post_body column to scan_stats table
+    const scanStatsCols = this.db.prepare("PRAGMA table_info(scan_stats)").all() as Array<{ name: string }>;
+    if (!scanStatsCols.some(c => c.name === 'post_body')) {
+      this.db.exec('ALTER TABLE scan_stats ADD COLUMN post_body TEXT');
     }
   }
 
@@ -764,9 +771,9 @@ CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
   upsertScanStats(stats: DbScanStats): void {
     const stmt = this.db.prepare(`
       INSERT INTO scan_stats (post_id, post_title, post_author, post_created_at, scanned_at,
-        total_comments_api, comments_analyzed, signal_count, noise_count, signal_rate, categories)
+        total_comments_api, comments_analyzed, signal_count, noise_count, signal_rate, categories, post_body)
       VALUES (@post_id, @post_title, @post_author, @post_created_at, @scanned_at,
-        @total_comments_api, @comments_analyzed, @signal_count, @noise_count, @signal_rate, @categories)
+        @total_comments_api, @comments_analyzed, @signal_count, @noise_count, @signal_rate, @categories, @post_body)
       ON CONFLICT(post_id) DO UPDATE SET
         post_title = @post_title,
         post_author = @post_author,
@@ -777,9 +784,10 @@ CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
         signal_count = @signal_count,
         noise_count = @noise_count,
         signal_rate = @signal_rate,
-        categories = @categories
+        categories = @categories,
+        post_body = @post_body
     `);
-    stmt.run(stats);
+    stmt.run({ ...stats, post_body: stats.post_body ?? null });
   }
 
   getAllScanStats(): DbScanStats[] {

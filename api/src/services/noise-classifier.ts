@@ -1581,6 +1581,7 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
         noise_count: totalComments - signalCount,
         signal_rate: analysis.signal_rate,
         categories: JSON.stringify(categories),
+        post_body: post.content || '',
       });
     } catch (e) {
       // Don't block the response if scan_stats write fails
