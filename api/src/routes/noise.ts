@@ -966,6 +966,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
 
   <div class="stats-section" id="statsSection">
     <h3>Platform Stats</h3>
+    <div style="font-size:12px;color:#8b8fa3;margin-top:-8px;margin-bottom:12px;">From posts with 10+ comments</div>
     <div id="statsLoading" style="text-align:center;padding:20px;color:var(--text-muted);font-size:14px;">Loading stats...</div>
     <div id="statsError" style="display:none;text-align:center;padding:20px;color:var(--red);font-size:14px;"></div>
     <div class="stats-grid" id="statsGrid"></div>
