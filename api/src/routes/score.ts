@@ -204,7 +204,7 @@ export function getSidebarCSS(): string {
 export function getSidebarHTML(activePage: 'home' | 'noise' | 'score'): string {
   const links = [
     { id: 'home', icon: '&#x1F3E0;', label: 'Home', href: '/' },
-    { id: 'noise', icon: '&#x1F4E1;', label: 'Noise Filter', href: '/noise' },
+    { id: 'noise', icon: '&#x1F4E1;', label: 'Slop Filter', href: '/noise' },
     { id: 'score', icon: '&#x1F3C6;', label: 'MoltScore', href: '/score' },
   ];
   const navItems = links.map(l =>

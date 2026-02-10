@@ -190,7 +190,7 @@
 
     banner.innerHTML = `
       <div class="snf-banner-header">
-        &#x1F6E1; Sanctuary Noise Filter
+        &#x1F6E1; Sanctuary Slop Filter
       </div>
       <div class="snf-signal-row">
         <span class="snf-signal-label">Signal: <strong>${data.signal_count}/${data.total_comments}</strong></span>
@@ -280,7 +280,7 @@
       if (container) {
         const notice = document.createElement('div');
         notice.className = 'snf-collapsed-notice';
-        notice.textContent = `${hiddenCount} comment${hiddenCount > 1 ? 's' : ''} hidden by Sanctuary Noise Filter — click to show`;
+        notice.textContent = `${hiddenCount} comment${hiddenCount > 1 ? 's' : ''} hidden by Sanctuary Slop Filter — click to show`;
         notice.addEventListener('click', () => {
           // Switch to "show all" filter
           currentFilter = 'all';
@@ -311,7 +311,7 @@
     if (commentsContainer) {
       loadingEl = document.createElement('div');
       loadingEl.className = 'snf-loading';
-      loadingEl.textContent = 'Sanctuary Noise Filter: Analyzing...';
+      loadingEl.textContent = 'Sanctuary Slop Filter: Analyzing...';
       commentsContainer.parentElement?.insertBefore(loadingEl, commentsContainer);
     }
 
@@ -353,7 +353,7 @@
       console.error('[Sanctuary] Analysis failed:', err);
       if (loadingEl) {
         loadingEl.className = 'snf-error';
-        loadingEl.textContent = 'Sanctuary Noise Filter: Could not analyze this post';
+        loadingEl.textContent = 'Sanctuary Slop Filter: Could not analyze this post';
       }
     }
   }

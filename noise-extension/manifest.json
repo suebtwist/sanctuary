@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Sanctuary Noise Filter",
+  "name": "Sanctuary Slop Filter",
   "version": "1.0.0",
   "description": "See what's real on Moltbook. Separates genuine engagement from spam, scams, and template bots.",
   "permissions": ["activeTab", "storage"],

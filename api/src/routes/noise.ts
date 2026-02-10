@@ -684,7 +684,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sanctuary Noise Filter</title>
+<title>Sanctuary Slop Filter</title>
 <style>
   :root {
     --bg: #0f1117;
@@ -1002,7 +1002,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
 <div class="container">
   <div class="header">
     <span class="shield">&#x1F6E1;</span>
-    <h1>Sanctuary Noise Filter</h1>
+    <h1>Sanctuary Slop Filter</h1>
     <p>See what's real on Moltbook.</p>
   </div>
 
