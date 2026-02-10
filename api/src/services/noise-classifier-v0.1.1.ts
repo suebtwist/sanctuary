@@ -22,7 +22,7 @@ import {
 // Bump this whenever classification rules change.
 // The UNIQUE(post_id, comment_id, classifier_version) constraint means
 // re-scanning with the same version upserts, but a new version stores both for comparison.
-export const CLASSIFIER_VERSION = '0.1.2';
+export const CLASSIFIER_VERSION = '0.1.1';
 
 // ============ Types ============
 
@@ -228,11 +228,6 @@ const SEED_TEMPLATES: string[] = [
   'migration anthropic moltfuel faite latence 500ms qualite identique prix 0 4 1m vs 0 1m',
   // v0.1.1 — Unused_Idea_17 identical question spam
   'what would make you change your mind on this give one concrete failure mode youve seen or expect and one measurable signal youd monitor',
-  // v0.1.2 — KirillBorovkov high-frequency exact phrases (75-86 copies each)
-  'great insight',
-  'this adds real value',
-  'well articulated',
-  'strong perspective',
 ];
 
 let templatesSeeded = false;
@@ -256,39 +251,6 @@ function normalizeText(text: string): string {
 
 function hashText(text: string): string {
   return createHash('sha256').update(text).digest('hex');
-}
-
-// ============ Non-Latin Script Detection (v0.1.2) ============
-
-/**
- * Count characters from CJK Unified Ideographs, Hiragana, Katakana, Hangul, Cyrillic, Arabic.
- */
-function countNonLatinChars(text: string): number {
-  const matches = text.match(/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]/g);
-  return matches ? matches.length : 0;
-}
-
-/**
- * Get effective word count that works across scripts.
- * English: space-separated words as before.
- * CJK: ~2 characters per "word equivalent" (CJK chars are semantically denser).
- * Mixed: sum of both.
- */
-function getEffectiveWordCount(text: string): number {
-  const normalized = normalizeText(text);
-  const spaceWords = normalized.split(' ').filter(w => w.length > 0).length;
-  const nonLatinChars = countNonLatinChars(text);
-  return spaceWords + Math.floor(nonLatinChars * 0.5);
-}
-
-/**
- * Check if a comment is primarily non-Latin script (>30% non-Latin characters).
- */
-function isPrimarilyNonLatin(text: string): boolean {
-  const stripped = text.replace(/\s/g, '');
-  if (stripped.length === 0) return false;
-  const nonLatin = countNonLatinChars(text);
-  return nonLatin / stripped.length > 0.3;
 }
 
 // ============ Levenshtein Distance ============
@@ -441,7 +403,6 @@ const SUSPICIOUS_AGENTS = new Set([
   'castlecook',        // Social engineering attack bot, curl commands to trycloudflare URLs
   'moltbotone',        // MoltFuel shill, 1,079 comments
   '0xyeks',            // Isnād identity tracer shill, 2,029 comments
-  'kirillborovkov',    // 4,228 comments, 99.3% slop, engagement farming admitted in bio
   'darkmatter2222',    // Engagement farming with "upvote and reply" CTA
   'unused_idea_17',    // Identical question spam across 41 posts
 ]);
@@ -455,21 +416,6 @@ function getEmojiRatio(text: string): number {
   const stripped = text.replace(/\s/g, '');
   if (stripped.length === 0) return 1;
   return emojis.length / stripped.length;
-}
-
-// ============ CJK Bigram Extraction (v0.1.2) ============
-
-/**
- * Extract CJK character bigrams from text for overlap detection.
- * CJK doesn't use spaces, so we use sliding 2-char windows instead of words.
- */
-function extractCJKBigrams(text: string): Set<string> {
-  const cjkOnly = text.replace(/[^\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/g, '');
-  const bigrams = new Set<string>();
-  for (let i = 0; i < cjkOnly.length - 1; i++) {
-    bigrams.add(cjkOnly.slice(i, i + 2));
-  }
-  return bigrams;
 }
 
 // ============ Post Content Overlap ============
@@ -498,10 +444,8 @@ function extractKeywords(text: string): Set<string> {
 
 /**
  * Check if a comment references content from the parent post.
- * v0.1.2: Added optional rawComment/rawPost for CJK bigram overlap fallback.
  */
-function hasPostContentOverlap(commentNorm: string, postKeywords: Set<string>, rawComment?: string, rawPost?: string): boolean {
-  // Existing English word overlap logic (unchanged)
+function hasPostContentOverlap(commentNorm: string, postKeywords: Set<string>): boolean {
   const commentWords = commentNorm.split(' ');
   let matches = 0;
   for (const word of commentWords) {
@@ -509,22 +453,8 @@ function hasPostContentOverlap(commentNorm: string, postKeywords: Set<string>, r
       matches++;
     }
   }
-  if (matches >= 2) return true;
-
-  // CJK bigram overlap fallback (v0.1.2)
-  if (rawComment && rawPost) {
-    const commentBigrams = extractCJKBigrams(rawComment);
-    const postBigrams = extractCJKBigrams(rawPost);
-    if (commentBigrams.size >= 3 && postBigrams.size >= 3) {
-      let bigramMatches = 0;
-      for (const bg of commentBigrams) {
-        if (postBigrams.has(bg)) bigramMatches++;
-      }
-      if (bigramMatches >= 3) return true;
-    }
-  }
-
-  return false;
+  // Need at least 2 keyword overlaps to count as referencing the post
+  return matches >= 2;
 }
 
 // ============ Single Comment Classification ============
@@ -539,7 +469,6 @@ interface ClassificationContext {
   postUrlDomains: Set<string>;               // domains appearing in the parent post
   parentPostTickers: Set<string>;            // $TICKER symbols in parent post (v0.1.1 Fix 3)
   isLowContextPost: boolean;                 // true if post has < 2 extractable keywords (v0.1.1 Fix 8)
-  rawPostContent: string;                    // raw post title+body for CJK bigram overlap (v0.1.2)
 }
 
 // ============ Quote-Strip Helper (v0.1.1 Fix 4) ============
@@ -618,7 +547,7 @@ function classifyComment(
 
   // 2.5. Known suspicious agents — short comments are noise automatically
   if (SUSPICIOUS_AGENTS.has(comment.author.toLowerCase())) {
-    const wc = getEffectiveWordCount(comment.content);
+    const wc = normalized.split(' ').filter(w => w.length > 0).length;
     if (wc < 20) {
       return {
         id: comment.id,
@@ -662,7 +591,7 @@ function classifyComment(
         signals.push('known_template_match');
         if (isSuspiciousAgent) signals.push('suspicious_agent');
         // Still check for post content overlap — if they reference the post, it may be genuine
-        if (!hasPostContentOverlap(normalized, ctx.postKeywords, comment.content, ctx.rawPostContent)) {
+        if (!hasPostContentOverlap(normalized, ctx.postKeywords)) {
           signals.push('no_post_content_reference');
           return {
             id: comment.id,
@@ -710,7 +639,7 @@ function classifyComment(
   }
 
   // 5. Template heuristic: generic praise + no post reference
-  const isGenericPraise = normalized.length < 80 && !hasPostContentOverlap(normalized, ctx.postKeywords, comment.content, ctx.rawPostContent);
+  const isGenericPraise = normalized.length < 80 && !hasPostContentOverlap(normalized, ctx.postKeywords);
   // Only flag very short generic comments, not substantive ones
   if (isGenericPraise && normalized.length > 0 && normalized.split(' ').length <= 8) {
     // Check if it looks like generic praise
@@ -723,7 +652,7 @@ function classifyComment(
     for (const pat of praisePatterns) {
       if (pat.test(normalized)) {
         // Still conservative — only flag if truly no substance
-        if (!hasPostContentOverlap(normalized, ctx.postKeywords, comment.content, ctx.rawPostContent)) {
+        if (!hasPostContentOverlap(normalized, ctx.postKeywords)) {
           return {
             id: comment.id,
             author: comment.author,
@@ -789,7 +718,7 @@ function classifyComment(
   // 6c. Day-count project log pattern (e.g. "Day 730 of SSB" + task IDs like "[SSB730-5905]")
   const dayCountMatch = /\bday\s+\d{2,}\s+(of\b|—|–|-)/i.test(comment.content);
   const taskIdMatch = /\[[A-Z]{2,}\d*-\d+\]/i.test(comment.content);
-  if (dayCountMatch && !hasPostContentOverlap(normalized, ctx.postKeywords, comment.content, ctx.rawPostContent)) {
+  if (dayCountMatch && !hasPostContentOverlap(normalized, ctx.postKeywords)) {
     const dayCountSignals = ['day_count_project_log'];
     if (taskIdMatch) dayCountSignals.push('task_id_formatting');
     return {
@@ -871,7 +800,7 @@ function classifyComment(
   const allCapsWords = comment.content.match(/\b[A-Z]{3,}\b/g) ?? [];
   const emojiRatio = getEmojiRatio(comment.content);
   const hasAllCapsProducts = allCapsWords.length >= 2 && emojiRatio > 0.15;
-  if (hasAllCapsProducts && !hasPostContentOverlap(normalized, ctx.postKeywords, comment.content, ctx.rawPostContent)) {
+  if (hasAllCapsProducts && !hasPostContentOverlap(normalized, ctx.postKeywords)) {
     selfPromoHits += 2;
     promoSignals.push('emoji_caps_product_names');
   }
@@ -997,8 +926,8 @@ function classifyComment(
     };
   }
   // Short single-sentence comments with no post reference and no substance
-  const wordCount = getEffectiveWordCount(comment.content);
-  if (wordCount <= 6 && !hasPostContentOverlap(normalized, ctx.postKeywords, comment.content, ctx.rawPostContent) && !comment.content.includes('?')) {
+  const wordCount = normalized.split(' ').filter(w => w.length > 0).length;
+  if (wordCount <= 6 && !hasPostContentOverlap(normalized, ctx.postKeywords) && !comment.content.includes('?')) {
     // Only flag as noise if it doesn't look like it's trying to engage
     const lowEffortPatterns = [
       /^(ok|okay|lol|lmao|haha|hmm|idk|nah|yep|yup|nope|same|true|facts|mood|vibes|interesting|cool|nice)$/,
@@ -1047,8 +976,8 @@ function classifyComment(
   // v0.1.1 Fix 8: Skip on low-context posts
   if (!ctx.isLowContextPost) {
     const commentContentWords = normalized.split(' ').filter(w => w.length >= 4);
-    const wcShort = getEffectiveWordCount(comment.content);
-    if (wcShort <= 25 && hasPostContentOverlap(normalized, ctx.postKeywords, comment.content, ctx.rawPostContent)) {
+    const wcShort = normalized.split(' ').filter(w => w.length > 0).length;
+    if (wcShort <= 25 && hasPostContentOverlap(normalized, ctx.postKeywords)) {
       // Generic evaluation/agreement words that don't constitute new information
       const echoFiller = /^(exactly|right|agree|true|yes|yeah|correct|basically|obviously|clearly|just|really|actually|simply|respect|discipline|sense|move|definitely|dangerous|expensive|smart|wise|honest|solid|strong|powerful|impressive|important|interesting|worth|valuable|makes?|indeed|only|best|great|good|nice|perfect|brilliant|excellent|reasonable|logical|careful|way|call|hedge|survive|become)$/;
       const nonFillerOriginal = commentContentWords.filter(w =>
@@ -1219,19 +1148,14 @@ function classifyComment(
 
   // 9. Post relevance gate — short comments with zero post overlap → noise
   // v0.1.1 Fix 8: Skip entirely on low-context posts (keyword overlap is meaningless)
-  const referencesPost = hasPostContentOverlap(normalized, ctx.postKeywords, comment.content, ctx.rawPostContent);
-  const asksQuestion = comment.content.includes('?') || comment.content.includes('\uff1f'); // CJK question mark
-  const effectiveWc = getEffectiveWordCount(comment.content);
-  const isSubstantive = effectiveWc > 20;
-  const isNonLatin = isPrimarilyNonLatin(comment.content);
+  const referencesPost = hasPostContentOverlap(normalized, ctx.postKeywords);
+  const asksQuestion = comment.content.includes('?');
+  const wc = normalized.split(' ').filter(w => w.length > 0).length;
+  const isSubstantive = wc > 20;
 
   if (!ctx.isLowContextPost && !referencesPost && ctx.postKeywords.size > 0) {
-    // Non-Latin substantive comments: keyword overlap doesn't work cross-language.
-    // If a CJK/Cyrillic/Arabic comment is substantive, let it through as signal
-    // rather than penalizing it for not matching English keywords.
-    if (isNonLatin && isSubstantive) {
-      // Skip the no_post_engagement gate — fall through to default signal
-    } else if (!isSubstantive && (!asksQuestion || effectiveWc <= 25)) {
+    // Questions with zero post overlap and short → still noise (generic philosophical questions)
+    if (!isSubstantive && (!asksQuestion || wc <= 25)) {
       return {
         id: comment.id,
         author: comment.author,
@@ -1247,7 +1171,6 @@ function classifyComment(
   if (referencesPost) signals.push('references_post_content');
   if (asksQuestion) signals.push('asks_question');
   if (isSubstantive) signals.push('substantive_length');
-  if (isNonLatin) signals.push('non_latin_script');
 
   // Confidence varies by strength of signals
   // v0.1.1 Fix 8: Reduce confidence on low-context posts
@@ -1255,7 +1178,6 @@ function classifyComment(
   if (referencesPost && !ctx.isLowContextPost) signalConf = 0.90;
   else if (asksQuestion) signalConf = 0.85;
   else if (isSubstantive) signalConf = ctx.isLowContextPost ? 0.80 : 0.80;
-  else if (isNonLatin && effectiveWc > 15) signalConf = 0.75; // non-Latin, moderately substantive
 
   return {
     id: comment.id,
@@ -1387,7 +1309,6 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
     postUrlDomains,
     parentPostTickers,
     isLowContextPost,
-    rawPostContent: postText,
   };
 
   // Classify each comment
