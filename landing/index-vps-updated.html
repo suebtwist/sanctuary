@@ -273,9 +273,29 @@
             transition: background 0.15s;
         }
         .ps-cta:hover { background: #4f46e5; text-decoration: none; color: #fff; }
+        /* ---- Slop Farms banner ---- */
+        .sf-banner {
+            display: none;
+            margin-top: 0.8rem;
+            background: #0a0a0e;
+            border: 1px solid #1a1a2a;
+            border-radius: 6px;
+            padding: 1rem 1.2rem;
+        }
+        .sf-header { font-size: 0.65rem; color: #aaa; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.15rem; font-weight: 600; }
+        .sf-subtitle { font-size: 0.6rem; color: #666; margin-bottom: 0.8rem; }
+        .sf-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 0.8rem; }
+        .sf-stat-val { font-size: 1.2rem; font-weight: 700; line-height: 1.2; }
+        .sf-stat-label { font-size: 0.55rem; color: #555; margin-top: 0.15rem; }
+        .sf-details { border-top: 1px solid #1a1a2a; padding-top: 0.6rem; }
+        .sf-detail-row { font-size: 0.6rem; color: #666; padding: 0.2rem 0; }
+        .sf-detail-rank { color: #f97316; font-weight: 700; }
+        .sf-footer { font-size: 0.55rem; color: #555; margin-top: 0.6rem; padding-top: 0.5rem; border-top: 1px solid #1a1a2a; }
         @media (max-width: 500px) {
             .ps-grid { grid-template-columns: repeat(2, 1fr); }
             .ps-card-value { font-size: 1.1rem; }
+            .sf-grid { grid-template-columns: repeat(2, 1fr); }
+            .sf-stat-val { font-size: 1rem; }
         }
 
         main {
@@ -463,6 +483,15 @@
                 <div class="ps-legend" id="psLegend"></div>
                 <div class="ps-meta" id="psMeta"></div>
                 <a href="/noise#chartsSection" class="ps-cta">See full charts on noise page &rarr;</a>
+            </div>
+
+            <!-- Slop Farms banner -->
+            <div class="sf-banner" id="sfBanner">
+                <div class="sf-header">Slop Farms</div>
+                <div class="sf-subtitle">Coordinated bot networks detected through shared spam templates</div>
+                <div class="sf-grid" id="sfGrid"></div>
+                <div class="sf-details" id="sfDetails"></div>
+                <div class="sf-footer">Detection: agents sharing 5+ identical spam comments across 3+ posts, &lt;15% signal rate</div>
             </div>
 
             <div id="noiseResult"></div>
@@ -674,6 +703,38 @@
                         '<span>Classifier v' + (d.classifier_version || "?") + ' \u00B7 Updated ' + new Date(d.last_updated).toLocaleTimeString() + '</span>';
 
                     document.getElementById("psBanner").style.display = "block";
+
+                    /* Slop Farms */
+                    if (d.slop_farms) {
+                        var sf = d.slop_farms;
+                        var sfGrid = document.getElementById("sfGrid");
+                        sfGrid.innerHTML = "";
+                        var sfStats = [
+                            { val: sf.farm_count.toLocaleString(), label: "Slop Farms Detected", color: "#ef4444" },
+                            { val: sf.total_agents.toLocaleString(), label: "Farmed Agents", color: "#f97316" },
+                            { val: sf.total_comments.toLocaleString(), label: "Farm Comments", color: "#e0e0e0" },
+                            { val: sf.comment_pct + "%", label: "of All Comments", color: "#f97316" }
+                        ];
+                        for (var si = 0; si < sfStats.length; si++) {
+                            var ss = sfStats[si];
+                            var se = document.createElement("div");
+                            se.innerHTML = '<div class="sf-stat-val" style="color:' + ss.color + '">' + ss.val + '</div><div class="sf-stat-label">' + ss.label + '</div>';
+                            sfGrid.appendChild(se);
+                        }
+                        var sfDetails = document.getElementById("sfDetails");
+                        sfDetails.innerHTML = "";
+                        if (sf.top_farms && sf.top_farms.length > 0) {
+                            for (var fi = 0; fi < sf.top_farms.length; fi++) {
+                                var farm = sf.top_farms[fi];
+                                var frow = document.createElement("div");
+                                frow.className = "sf-detail-row";
+                                frow.innerHTML = '<span class="sf-detail-rank">Farm #' + farm.rank + '</span> ' +
+                                    farm.agent_count + ' agents, ' + farm.shared_templates + ' shared templates, ' + farm.total_comments.toLocaleString() + ' comments';
+                                sfDetails.appendChild(frow);
+                            }
+                        }
+                        document.getElementById("sfBanner").style.display = "block";
+                    }
                 })
                 .catch(function(e) { console.error("platform stats:", e); });
         }

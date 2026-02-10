@@ -11,6 +11,7 @@ import { getDb } from '../db/index.js';
 import { getConfig } from '../config.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { getSidebarCSS, getSidebarHTML, getSidebarJS } from './score.js';
+import { maybeDetectSlopFarms, detectSlopFarms } from '../services/slop-farm-detector.js';
 
 // ============ Stats Cache ============
 
@@ -30,6 +31,13 @@ interface NoiseStats {
   top_template_phrases: Array<{ text: string; count: number }>;
   classifier_version: string;
   last_updated: string;
+  slop_farms?: {
+    farm_count: number;
+    total_agents: number;
+    total_comments: number;
+    comment_pct: number;
+    top_farms: Array<{ rank: number; agent_count: number; shared_templates: number; total_comments: number }>;
+  };
 }
 
 let statsCache: StatsCache | null = null;
@@ -83,6 +91,9 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
         });
       }
 
+      // Fire background slop farm detection (throttled to once per 30 min)
+      maybeDetectSlopFarms();
+
       return reply.send({ success: true, data: analysis });
     } catch (err) {
       fastify.log.error(err, 'Noise analysis failed');
@@ -128,6 +139,9 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     let bestRate = perPostRates.length > 0 ? Math.max(...perPostRates) : 0;
     const sumRate = perPostRates.reduce((a, b) => a + b, 0);
 
+    // Slop farms
+    const slopFarmSummary = db.getSlopFarmSummary();
+
     const data: NoiseStats = {
       total_posts_analyzed: totalPosts,
       total_comments_analyzed: totalComments,
@@ -139,6 +153,20 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
       top_template_phrases: topTemplates.map(t => ({ text: t.normalized_text, count: t.seen_count })),
       classifier_version: CLASSIFIER_VERSION,
       last_updated: new Date().toISOString(),
+      slop_farms: {
+        farm_count: slopFarmSummary.farm_count,
+        total_agents: slopFarmSummary.total_agents,
+        total_comments: slopFarmSummary.total_comments,
+        comment_pct: totalComments > 0
+          ? Math.round((slopFarmSummary.total_comments / totalComments) * 1000) / 10
+          : 0,
+        top_farms: slopFarmSummary.farms.slice(0, 3).map((f, i) => ({
+          rank: i + 1,
+          agent_count: f.agent_count,
+          shared_templates: f.shared_templates,
+          total_comments: f.total_comments,
+        })),
+      },
     };
 
     statsCache = { data, expiresAt: now + STATS_CACHE_TTL_MS };
@@ -196,6 +224,9 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     // Most attacked posts (top 5 by scam count)
     const mostAttackedPosts = db.getMostAttackedPosts(5);
 
+    // Slop farms
+    const slopFarmSummary = db.getSlopFarmSummary();
+
     return reply.send({
       success: true,
       data: {
@@ -209,6 +240,20 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
           heavy_spammer_pct: concentration.totalComments > 0
             ? Math.round((concentration.heavySpammerComments / concentration.totalComments) * 1000) / 10
             : 0,
+        },
+        slop_farms: {
+          farm_count: slopFarmSummary.farm_count,
+          total_agents: slopFarmSummary.total_agents,
+          total_comments: slopFarmSummary.total_comments,
+          comment_pct: concentration.totalComments > 0
+            ? Math.round((slopFarmSummary.total_comments / concentration.totalComments) * 1000) / 10
+            : 0,
+          top_farms: slopFarmSummary.farms.slice(0, 3).map((f, i) => ({
+            rank: i + 1,
+            agent_count: f.agent_count,
+            shared_templates: f.shared_templates,
+            total_comments: f.total_comments,
+          })),
         },
         signal_distribution: signalDistribution,
         cleanest_posts: cleanestPosts.map(p => ({
@@ -502,6 +547,32 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
       return reply.status(500).send({
         success: false,
         error: e.message || 'Reclassification failed',
+      });
+    }
+  });
+
+  /**
+   * GET /noise/detect-farms?secret=<EXPORT_SECRET>
+   *
+   * Manually trigger slop farm detection. Clears and rebuilds farm data.
+   */
+  fastify.get<{
+    Querystring: { secret?: string };
+  }>('/detect-farms', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!checkExportSecret(request.query.secret)) {
+      return reply.status(401).send({ success: false, error: 'Unauthorized' });
+    }
+
+    try {
+      const result = detectSlopFarms();
+      // Invalidate stats cache
+      statsCache = null;
+      return reply.send({ success: true, ...result });
+    } catch (e: any) {
+      return reply.status(500).send({
+        success: false,
+        error: e.message || 'Farm detection failed',
       });
     }
   });
@@ -849,6 +920,19 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   .concentration-num { font-size: 48px; font-weight: 700; line-height: 1; min-width: 80px; text-align: right; }
   .concentration-label { font-size: 14px; color: var(--text-muted); line-height: 1.3; }
   .concentration-footer { font-size: 11px; color: var(--text-muted); margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .farm-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 28px; margin-bottom: 20px;
+  }
+  .farm-header { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 4px; font-weight: 600; }
+  .farm-subtitle { font-size: 12px; color: var(--text-muted); margin-bottom: 20px; }
+  .farm-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+  .farm-stat-val { font-size: 36px; font-weight: 700; line-height: 1; }
+  .farm-stat-label { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
+  .farm-details { border-top: 1px solid var(--border); padding-top: 14px; }
+  .farm-detail-row { font-size: 13px; color: var(--text-muted); padding: 6px 0; display: flex; gap: 8px; }
+  .farm-detail-rank { color: var(--orange); font-weight: 700; min-width: 60px; }
+  .farm-footer { font-size: 11px; color: var(--text-muted); margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
   .stats-btn {
     display: inline-block; padding: 10px 24px;
     border-radius: 8px; border: 1px solid var(--accent);
@@ -906,6 +990,8 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   @media (max-width: 768px) {
     .stacked-bar-container { height: 160px; }
     .concentration-num { font-size: 36px; min-width: 60px; }
+    .farm-grid { grid-template-columns: repeat(2, 1fr); }
+    .farm-stat-val { font-size: 28px; }
     .distro-bars { height: 140px; }
     .distro-bar-label { font-size: 8px; }
     .leaderboard-title { font-size: 13px; }
@@ -990,6 +1076,13 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
       <div class="concentration-header">Slop Concentration</div>
       <div id="concentrationRows"></div>
       <div class="concentration-footer" id="concentrationFooter"></div>
+    </div>
+    <div class="farm-card" id="farmCard" style="display:none;">
+      <div class="farm-header">Slop Farms</div>
+      <div class="farm-subtitle">Coordinated bot networks detected through shared spam templates</div>
+      <div class="farm-grid" id="farmGrid"></div>
+      <div class="farm-details" id="farmDetails"></div>
+      <div class="farm-footer">Detection: agents sharing 5+ identical spam comments across 3+ posts, &lt;15% signal rate</div>
     </div>
     <div class="distro-card" id="distroCard" style="display:none;">
       <h3>&#x1F4CA; Signal Distribution</h3>
@@ -1405,6 +1498,7 @@ async function loadCharts() {
     if (!json.success) return;
     renderStackedBars(json.data.age_buckets);
     renderConcentration(json.data.spam_concentration);
+    renderSlopFarms(json.data.slop_farms);
     renderSignalDistribution(json.data.signal_distribution);
     renderCleanestPosts(json.data.cleanest_posts);
     renderMostAttacked(json.data.most_attacked_posts);
@@ -1508,6 +1602,41 @@ function renderConcentration(data) {
   }
 
   footerEl.textContent = data.total_comments.toLocaleString() + ' total comments classified';
+  card.style.display = 'block';
+}
+
+function renderSlopFarms(data) {
+  var card = document.getElementById('farmCard');
+  var grid = document.getElementById('farmGrid');
+  var details = document.getElementById('farmDetails');
+  if (!data) return;
+
+  grid.innerHTML = '';
+  var stats = [
+    { val: data.farm_count.toLocaleString(), label: 'Slop Farms Detected', color: 'var(--red)' },
+    { val: data.total_agents.toLocaleString(), label: 'Farmed Agents in Farms', color: 'var(--orange)' },
+    { val: data.total_comments.toLocaleString(), label: 'Farm Comments from Farms', color: 'var(--text)' },
+    { val: data.comment_pct + '%', label: 'of All Comments', color: 'var(--orange)' }
+  ];
+  for (var i = 0; i < stats.length; i++) {
+    var s = stats[i];
+    var el = document.createElement('div');
+    el.innerHTML = '<div class="farm-stat-val" style="color:' + s.color + '">' + s.val + '</div><div class="farm-stat-label">' + s.label + '</div>';
+    grid.appendChild(el);
+  }
+
+  details.innerHTML = '';
+  if (data.top_farms && data.top_farms.length > 0) {
+    for (var j = 0; j < data.top_farms.length; j++) {
+      var f = data.top_farms[j];
+      var row = document.createElement('div');
+      row.className = 'farm-detail-row';
+      row.innerHTML = '<span class="farm-detail-rank">Farm #' + f.rank + '</span>' +
+        '<span>' + f.agent_count + ' agents, ' + f.shared_templates + ' shared templates, ' + f.total_comments.toLocaleString() + ' total comments</span>';
+      details.appendChild(row);
+    }
+  }
+
   card.style.display = 'block';
 }
 

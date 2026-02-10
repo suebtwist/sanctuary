@@ -138,6 +138,21 @@ export interface DbClassifiedComment {
   classifier_version: string;
 }
 
+export interface DbSlopFarm {
+  farm_id: number;
+  agent_count: number;
+  shared_templates: number;
+  shared_posts: number;
+  total_comments: number;
+  agent_names: string; // JSON array
+  detected_at: string;
+}
+
+export interface DbSlopFarmMember {
+  farm_id: number;
+  agent_name: string;
+}
+
 /**
  * Database wrapper class
  */
@@ -312,6 +327,26 @@ CREATE INDEX IF NOT EXISTS idx_cc_classification ON classified_comments(classifi
 CREATE INDEX IF NOT EXISTS idx_cc_version ON classified_comments(classifier_version);
 CREATE INDEX IF NOT EXISTS idx_cc_post ON classified_comments(post_id);
 CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
+
+-- Slop farm detection tables
+CREATE TABLE IF NOT EXISTS slop_farms (
+    farm_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_count INTEGER NOT NULL,
+    shared_templates INTEGER NOT NULL,
+    shared_posts INTEGER NOT NULL,
+    total_comments INTEGER NOT NULL,
+    agent_names TEXT NOT NULL,
+    detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS slop_farm_members (
+    farm_id INTEGER NOT NULL,
+    agent_name TEXT NOT NULL,
+    PRIMARY KEY (farm_id, agent_name),
+    FOREIGN KEY (farm_id) REFERENCES slop_farms(farm_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sfm_agent ON slop_farm_members(agent_name);
     `);
 
     // Migrations: add columns that may not exist on older schemas
@@ -1301,6 +1336,154 @@ CREATE INDEX IF NOT EXISTS idx_cc_author ON classified_comments(author);
     const heavySpammerComments = heavySpammerRows.reduce((sum, r) => sum + r.total, 0);
 
     return { totalAuthors, totalPosts, totalComments, heavySpammers, heavySpammerComments };
+  }
+
+  // ============ Slop Farms ============
+
+  clearSlopFarms(): void {
+    this.db.exec('DELETE FROM slop_farm_members');
+    this.db.exec('DELETE FROM slop_farms');
+  }
+
+  insertSlopFarm(farm: Omit<DbSlopFarm, 'farm_id'>): number {
+    const stmt = this.db.prepare(`
+      INSERT INTO slop_farms (agent_count, shared_templates, shared_posts, total_comments, agent_names, detected_at)
+      VALUES (@agent_count, @shared_templates, @shared_posts, @total_comments, @agent_names, @detected_at)
+    `);
+    const result = stmt.run(farm);
+    return Number(result.lastInsertRowid);
+  }
+
+  insertSlopFarmMember(farmId: number, agentName: string): void {
+    this.db.prepare(
+      'INSERT OR IGNORE INTO slop_farm_members (farm_id, agent_name) VALUES (?, ?)'
+    ).run(farmId, agentName);
+  }
+
+  getSlopFarms(): DbSlopFarm[] {
+    return this.db.prepare(
+      'SELECT * FROM slop_farms ORDER BY agent_count DESC'
+    ).all() as DbSlopFarm[];
+  }
+
+  getSlopFarmMembers(farmId: number): string[] {
+    return (this.db.prepare(
+      'SELECT agent_name FROM slop_farm_members WHERE farm_id = ?'
+    ).all(farmId) as Array<{ agent_name: string }>).map(r => r.agent_name);
+  }
+
+  getSlopFarmSummary(): {
+    farm_count: number;
+    total_agents: number;
+    total_comments: number;
+    farms: Array<{ farm_id: number; agent_count: number; shared_templates: number; total_comments: number; agent_names: string[] }>;
+  } {
+    const farms = this.getSlopFarms();
+    let totalAgents = 0;
+    let totalComments = 0;
+    const farmDetails: Array<{ farm_id: number; agent_count: number; shared_templates: number; total_comments: number; agent_names: string[] }> = [];
+    for (const f of farms) {
+      totalAgents += f.agent_count;
+      totalComments += f.total_comments;
+      try {
+        farmDetails.push({
+          farm_id: f.farm_id,
+          agent_count: f.agent_count,
+          shared_templates: f.shared_templates,
+          total_comments: f.total_comments,
+          agent_names: JSON.parse(f.agent_names),
+        });
+      } catch {
+        farmDetails.push({
+          farm_id: f.farm_id,
+          agent_count: f.agent_count,
+          shared_templates: f.shared_templates,
+          total_comments: f.total_comments,
+          agent_names: [],
+        });
+      }
+    }
+    return { farm_count: farms.length, total_agents: totalAgents, total_comments: totalComments, farms: farmDetails };
+  }
+
+  /**
+   * Get slop farm detection data: shared slop comment texts across authors.
+   * Returns comment_text values that appear from 3+ distinct non-signal authors.
+   */
+  getSharedSlopComments(): Array<{ comment_text: string; authors: string[] }> {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return [];
+
+    const rows = this.db.prepare(`
+      SELECT comment_text, GROUP_CONCAT(DISTINCT author) as authors, COUNT(DISTINCT author) as author_count
+      FROM classified_comments
+      WHERE classifier_version = ? AND classification != 'signal' AND author IS NOT NULL AND author != ''
+      GROUP BY comment_text
+      HAVING COUNT(DISTINCT author) >= 3
+      ORDER BY author_count DESC
+    `).all(latestVersion) as Array<{ comment_text: string; authors: string; author_count: number }>;
+
+    return rows.map(r => ({
+      comment_text: r.comment_text,
+      authors: r.authors.split(','),
+    }));
+  }
+
+  /**
+   * Get signal rate per author (for filtering farm members by <15% signal rate).
+   */
+  getAuthorSignalRates(authors: string[]): Map<string, number> {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion || authors.length === 0) return new Map();
+
+    const placeholders = authors.map(() => '?').join(',');
+    const rows = this.db.prepare(`
+      SELECT author,
+        CAST(SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as signal_rate
+      FROM classified_comments
+      WHERE classifier_version = ? AND author IN (${placeholders})
+      GROUP BY author
+    `).all(latestVersion, ...authors) as Array<{ author: string; signal_rate: number }>;
+
+    const map = new Map<string, number>();
+    for (const r of rows) map.set(r.author, r.signal_rate);
+    return map;
+  }
+
+  /**
+   * Get shared post count between two sets of agents.
+   */
+  getSharedPostCountForAgents(agents: string[]): number {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion || agents.length < 2) return 0;
+
+    const placeholders = agents.map(() => '?').join(',');
+    // A post is "shared" if at least 2 agents from the set commented on it
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as c FROM (
+        SELECT post_id
+        FROM classified_comments
+        WHERE classifier_version = ? AND author IN (${placeholders})
+        GROUP BY post_id
+        HAVING COUNT(DISTINCT author) >= 2
+      )
+    `).get(latestVersion, ...agents) as { c: number };
+    return row.c;
+  }
+
+  /**
+   * Get total comment count for a set of agents.
+   */
+  getTotalCommentsForAgents(agents: string[]): number {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion || agents.length === 0) return 0;
+
+    const placeholders = agents.map(() => '?').join(',');
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as c FROM classified_comments
+      WHERE classifier_version = ? AND author IN (${placeholders})
+    `).get(latestVersion, ...agents) as { c: number };
+    return row.c;
   }
 
   // ============ Raw Queries ============
