@@ -6,7 +6,7 @@
  */
 
 import { FastifyInstance } from 'fastify';
-import { analyzePost, PostAnalysis, CLASSIFIER_VERSION } from '../services/noise-classifier.js';
+import { analyzePost, PostAnalysis, CLASSIFIER_VERSION, reclassifyExistingComments } from '../services/noise-classifier.js';
 import { getDb } from '../db/index.js';
 import { getConfig } from '../config.js';
 import { readFileSync, existsSync } from 'node:fs';
@@ -473,6 +473,37 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
       results,
       errors,
     });
+  });
+
+  /**
+   * GET /noise/reclassify?secret=<EXPORT_SECRET>
+   *
+   * Re-classify all existing comments in the DB using the current classifier version.
+   * Does NOT re-fetch from Moltbook — works purely from stored comment_text.
+   */
+  fastify.get<{
+    Querystring: { secret?: string };
+  }>('/reclassify', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!checkExportSecret(request.query.secret)) {
+      return reply.status(401).send({ success: false, error: 'Unauthorized' });
+    }
+
+    try {
+      const result = await reclassifyExistingComments();
+      // Invalidate stats cache
+      statsCache = null;
+      return reply.send({
+        success: true,
+        classifier_version: CLASSIFIER_VERSION,
+        ...result,
+      });
+    } catch (e: any) {
+      return reply.status(500).send({
+        success: false,
+        error: e.message || 'Reclassification failed',
+      });
+    }
   });
 
   /**

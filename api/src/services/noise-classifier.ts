@@ -1611,3 +1611,183 @@ async function analyzePostInner(postId: string): Promise<PostAnalysis | null> {
 
   return analysis;
 }
+
+// ============ Re-classification from DB (v0.1.2) ============
+
+/**
+ * Re-classify all existing comments in the DB without re-fetching from Moltbook.
+ * Groups comments by post_id, reconstructs classification context from stored data,
+ * and inserts new rows with the current CLASSIFIER_VERSION.
+ *
+ * Note: Post body is not stored in the DB, so keyword overlap uses title-only context.
+ * This is acceptable since the main v0.1.2 fixes (KirillBorovkov, CJK word count) are
+ * not dependent on post body content.
+ */
+export async function reclassifyExistingComments(): Promise<{
+  totalPosts: number;
+  totalComments: number;
+  reclassified: number;
+  errors: number;
+  changes: { noiseToSignal: number; signalToNoise: number; sameCategory: number };
+}> {
+  const db = getDb();
+
+  // Ensure seed templates are loaded
+  ensureTemplatesSeeded();
+  const knownTemplates = db.getAllKnownTemplates();
+  const knownTemplateTexts = knownTemplates.map(t => t.normalized_text);
+
+  // Get all distinct post_ids
+  const postIds = db.getScannedPostIds();
+  const now = new Date().toISOString();
+
+  let totalComments = 0;
+  let reclassified = 0;
+  let errors = 0;
+  let noiseToSignal = 0;
+  let signalToNoise = 0;
+  let sameCategory = 0;
+
+  for (const postId of postIds) {
+    try {
+      // Fetch all comments for this post from the DB (any version)
+      const rows = db.getClassifiedComments({ postId, version: 'all', limit: 5000, offset: 0 });
+      if (rows.length === 0) continue;
+
+      // Deduplicate by comment_id (take the latest version's row for text/metadata)
+      const byCommentId = new Map<string, typeof rows[0]>();
+      for (const r of rows) {
+        const existing = byCommentId.get(r.comment_id);
+        if (!existing || r.classifier_version > existing.classifier_version) {
+          byCommentId.set(r.comment_id, r);
+        }
+      }
+
+      const comments = [...byCommentId.values()];
+      const postTitle = comments[0]?.post_title || 'Untitled';
+      const postAuthor = comments[0]?.post_author || 'unknown';
+
+      // Build context from stored data (title only — no post body available)
+      const postText = postTitle;
+      const postKeywords = extractKeywords(postText);
+      const isLowContextPost = postKeywords.size < 2;
+
+      const parentPostTickers = new Set<string>();
+      const postTickerMatches = postText.match(/\$[A-Z]{2,10}/g);
+      if (postTickerMatches) {
+        for (const t of postTickerMatches) parentPostTickers.add(t);
+      }
+
+      const postUrlDomains = new Set(extractUrlDomains(postText).map(d => d.replace(/^www\./, '')));
+
+      // Pre-compute per-author comment counts
+      const authorCommentCounts = new Map<string, number>();
+      for (const c of comments) {
+        const key = (c.author || '').toLowerCase();
+        authorCommentCounts.set(key, (authorCommentCounts.get(key) ?? 0) + 1);
+      }
+
+      const ctx: ClassificationContext = {
+        seenHashes: new Set(),
+        normalizedComments: [],
+        postKeywords,
+        postTitleNormalized: normalizeText(postTitle),
+        knownTemplateTexts,
+        authorCommentCounts,
+        postUrlDomains,
+        parentPostTickers,
+        isLowContextPost,
+        rawPostContent: postText,
+      };
+
+      // Re-classify each comment
+      const newClassifications: DbClassifiedComment[] = [];
+      for (const row of comments) {
+        const moltbookComment: MoltbookComment = {
+          id: row.comment_id,
+          author: row.author || 'unknown',
+          content: row.comment_text,
+          created_at: '',
+        };
+
+        // Run cross-post duplicate check
+        const commentNorm = normalizeText(moltbookComment.content);
+        const commentHash = hashText(commentNorm);
+        let result = checkCrossPostDuplicate(
+          moltbookComment.author, commentNorm, commentHash, postId, moltbookComment.id,
+        );
+        if (result) {
+          result.text = moltbookComment.content;
+        } else {
+          result = classifyComment(moltbookComment, ctx);
+        }
+        updateCrossPostIndex(moltbookComment.author, commentNorm, commentHash, postId, moltbookComment.id);
+
+        // Track changes
+        const oldClassification = row.classification;
+        const newClassification = result.classification;
+        const oldIsSignal = oldClassification === 'signal';
+        const newIsSignal = newClassification === 'signal';
+        if (!oldIsSignal && newIsSignal) noiseToSignal++;
+        else if (oldIsSignal && !newIsSignal) signalToNoise++;
+        else sameCategory++;
+
+        newClassifications.push({
+          post_id: postId,
+          post_title: postTitle,
+          post_author: postAuthor,
+          comment_id: result.id,
+          author: result.author,
+          comment_text: result.text,
+          classification: result.classification,
+          confidence: result.confidence,
+          signals: JSON.stringify(result.signals),
+          classified_at: now,
+          classifier_version: CLASSIFIER_VERSION,
+        });
+
+        // Learn new templates
+        if (result.classification === 'spam_template' && commentNorm.length > 3) {
+          db.upsertKnownTemplate(commentNorm, Math.floor(Date.now() / 1000));
+        }
+      }
+
+      // Apply post-processing passes (account flooding, coordinated naming, conlang)
+      // Simplified: just account flooding for re-classification
+      for (const cls of newClassifications) {
+        if (cls.classification === 'signal') {
+          const count = authorCommentCounts.get((cls.author || '').toLowerCase()) ?? 0;
+          if (count >= 10) {
+            cls.classification = 'spam_template';
+            cls.confidence = 0.85;
+            cls.signals = JSON.stringify(['account_flooding_ceiling', `${count}_comments_on_post`]);
+          } else if (count >= 3) {
+            const wc = cls.comment_text.split(/\s+/).length;
+            const isDeepEngagement = cls.confidence >= 0.85 && wc > 30;
+            if (!isDeepEngagement) {
+              cls.classification = 'spam_template';
+              cls.confidence = 0.78;
+              cls.signals = JSON.stringify(['account_flooding', `${count}_comments_on_post`]);
+            }
+          }
+        }
+      }
+
+      // Bulk insert
+      db.bulkInsertClassifiedComments(newClassifications);
+      totalComments += newClassifications.length;
+      reclassified += newClassifications.length;
+    } catch (e) {
+      console.error(`reclassify failed for post ${postId}:`, e);
+      errors++;
+    }
+  }
+
+  return {
+    totalPosts: postIds.length,
+    totalComments,
+    reclassified,
+    errors,
+    changes: { noiseToSignal, signalToNoise, sameCategory },
+  };
+}
