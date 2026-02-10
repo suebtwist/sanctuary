@@ -347,6 +347,23 @@ CREATE TABLE IF NOT EXISTS slop_farm_members (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sfm_agent ON slop_farm_members(agent_name);
+
+-- Classification snapshots (temporal tracking)
+CREATE TABLE IF NOT EXISTS classification_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    signal_count INTEGER NOT NULL,
+    slop_count INTEGER NOT NULL,
+    total_count INTEGER NOT NULL,
+    signal_rate REAL NOT NULL,
+    posts_count INTEGER NOT NULL,
+    moltscore REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshot_agent_date ON classification_snapshots(agent_name, snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_snapshot_date ON classification_snapshots(snapshot_date);
     `);
 
     // Migrations: add columns that may not exist on older schemas
@@ -1484,6 +1501,85 @@ CREATE INDEX IF NOT EXISTS idx_sfm_agent ON slop_farm_members(agent_name);
       WHERE classifier_version = ? AND author IN (${placeholders})
     `).get(latestVersion, ...agents) as { c: number };
     return row.c;
+  }
+
+  // ============ Classification Snapshots ============
+
+  /**
+   * Get per-agent stats for snapshot: signal_count, slop_count, total, signal_rate, posts_count.
+   * Only includes agents with >= minComments total and >= minPosts distinct posts.
+   */
+  getAgentSnapshotData(minComments: number = 10, minPosts: number = 3): Array<{
+    author: string; signal_count: number; slop_count: number;
+    total_count: number; signal_rate: number; posts_count: number;
+  }> {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return [];
+
+    return this.db.prepare(`
+      SELECT author,
+        SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) as signal_count,
+        SUM(CASE WHEN classification != 'signal' THEN 1 ELSE 0 END) as slop_count,
+        COUNT(*) as total_count,
+        CAST(SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as signal_rate,
+        COUNT(DISTINCT post_id) as posts_count
+      FROM classified_comments
+      WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+      GROUP BY author
+      HAVING COUNT(*) >= ? AND COUNT(DISTINCT post_id) >= ?
+    `).all(latestVersion, minComments, minPosts) as Array<{
+      author: string; signal_count: number; slop_count: number;
+      total_count: number; signal_rate: number; posts_count: number;
+    }>;
+  }
+
+  /**
+   * Upsert a classification snapshot row (one per agent per day).
+   */
+  upsertClassificationSnapshot(snapshot: {
+    agent_name: string; snapshot_date: string;
+    signal_count: number; slop_count: number; total_count: number;
+    signal_rate: number; posts_count: number; moltscore: number;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO classification_snapshots
+        (agent_name, snapshot_date, signal_count, slop_count, total_count, signal_rate, posts_count, moltscore)
+      VALUES (@agent_name, @snapshot_date, @signal_count, @slop_count, @total_count, @signal_rate, @posts_count, @moltscore)
+      ON CONFLICT(agent_name, snapshot_date) DO UPDATE SET
+        signal_count = @signal_count,
+        slop_count = @slop_count,
+        total_count = @total_count,
+        signal_rate = @signal_rate,
+        posts_count = @posts_count,
+        moltscore = @moltscore,
+        created_at = datetime('now')
+    `).run(snapshot);
+  }
+
+  /**
+   * Get the count of snapshots for a given date.
+   */
+  getSnapshotCount(date: string): number {
+    const row = this.db.prepare(
+      'SELECT COUNT(*) as c FROM classification_snapshots WHERE snapshot_date = ?'
+    ).get(date) as { c: number };
+    return row.c;
+  }
+
+  // ============ Rescan Scheduling ============
+
+  /**
+   * Get post IDs that were last scanned more than `daysOld` days ago.
+   * Returns oldest-scanned first, limited to `limit` results.
+   */
+  getStalePostIds(daysOld: number = 7, limit: number = 50): string[] {
+    const cutoff = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000).toISOString();
+    return (this.db.prepare(`
+      SELECT post_id FROM scan_stats
+      WHERE scanned_at < ?
+      ORDER BY scanned_at ASC
+      LIMIT ?
+    `).all(cutoff, limit) as Array<{ post_id: string }>).map(r => r.post_id);
   }
 
   // ============ Raw Queries ============

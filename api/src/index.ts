@@ -21,6 +21,7 @@ import { statsRoutes } from './routes/stats.js';
 import { noiseRoutes } from './routes/noise.js';
 import { scoreRoutes } from './routes/score.js';
 import { detectFallenAgents } from './services/trust-calculator.js';
+import { takeClassificationSnapshot, rescanOldPosts } from './services/temporal-snapshots.js';
 
 async function main() {
   // Load configuration
@@ -201,6 +202,38 @@ async function main() {
         fastify.log.error(err, 'Failed to detect fallen agents');
       }
     }, 6 * 60 * 60 * 1000);
+
+    // Daily job: classification snapshots every 24 hours
+    // Take initial snapshot on startup, then every 24h
+    setTimeout(() => {
+      try {
+        const result = takeClassificationSnapshot();
+        fastify.log.info(result, 'Classification snapshot taken');
+      } catch (err) {
+        fastify.log.error(err, 'Failed to take classification snapshot');
+      }
+    }, 30_000); // 30s after startup to let DB settle
+
+    setInterval(() => {
+      try {
+        const result = takeClassificationSnapshot();
+        fastify.log.info(result, 'Classification snapshot taken');
+      } catch (err) {
+        fastify.log.error(err, 'Failed to take classification snapshot');
+      }
+    }, 24 * 60 * 60 * 1000);
+
+    // Background rescan: rescan stale posts every 2 hours
+    setInterval(async () => {
+      try {
+        const result = await rescanOldPosts();
+        if (result.rescanned > 0) {
+          fastify.log.info(result, 'Stale post rescan completed');
+        }
+      } catch (err) {
+        fastify.log.error(err, 'Failed to rescan stale posts');
+      }
+    }, 2 * 60 * 60 * 1000);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
