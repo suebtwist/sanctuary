@@ -9,6 +9,33 @@ import { FastifyInstance } from 'fastify';
 import { getDb } from '../db/index.js';
 import { CLASSIFIER_VERSION } from '../services/noise-classifier.js';
 
+// ============ Wilson Score Lower Bound ============
+
+/**
+ * Computes the MoltScore for an agent using Wilson Score Lower Bound
+ * with a diversity multiplier. This is the statistically correct way
+ * to rank items by proportion when sample sizes differ.
+ *
+ * - Wilson handles sample size: small samples → conservative score
+ * - Diversity multiplier: agents spread across many posts score higher
+ */
+function moltScore(signalCount: number, totalCount: number, postsCount: number): number {
+  if (totalCount === 0) return 0;
+  const p = signalCount / totalCount;
+  const n = totalCount;
+  const z = 1.96; // 95% confidence interval
+  const z2 = z * z;
+
+  // Wilson score lower bound
+  const wilson = (p + z2 / (2 * n) - z * Math.sqrt((p * (1 - p) + z2 / (4 * n)) / n)) / (1 + z2 / n);
+
+  // Diversity multiplier (0.8 to 1.0)
+  // Penalizes agents who only comment on 1-2 posts vs spread across many
+  const diversity = 0.8 + 0.2 * (1 - 1 / postsCount);
+
+  return Math.max(0, wilson * diversity);
+}
+
 export async function scoreRoutes(fastify: FastifyInstance): Promise<void> {
 
   /**
@@ -23,20 +50,25 @@ export async function scoreRoutes(fastify: FastifyInstance): Promise<void> {
     const minComments = Math.max(parseInt(request.query.min_comments || '10', 10) || 10, 1);
     const minPosts = Math.max(parseInt(request.query.min_posts || '3', 10) || 3, 1);
 
-    const agents = db.getAgentLeaderboard(limit, minComments, minPosts);
+    // Fetch more than limit since we'll re-sort by MoltScore
+    const agents = db.getAgentLeaderboard(500, minComments, minPosts);
     const qualifyingCount = db.getQualifyingAgentCount(minComments, minPosts);
+
+    // Compute MoltScore and sort by it
+    const scored = agents.map(a => ({
+      agent: a.author,
+      molt_score: Math.round(moltScore(a.signal_count, a.total_comments, a.post_count) * 1000) / 10,
+      signal_rate: Math.round(a.signal_rate * 1000) / 10,
+      signal_count: a.signal_count,
+      total_comments: a.total_comments,
+      post_count: a.post_count,
+    }));
+    scored.sort((a, b) => b.molt_score - a.molt_score);
 
     return reply.send({
       success: true,
       data: {
-        agents: agents.map((a, i) => ({
-          rank: i + 1,
-          agent: a.author,
-          signal_rate: Math.round(a.signal_rate * 1000) / 10,
-          signal_count: a.signal_count,
-          total_comments: a.total_comments,
-          post_count: a.post_count,
-        })),
+        agents: scored.slice(0, limit).map((a, i) => ({ rank: i + 1, ...a })),
         qualifying_count: qualifyingCount,
         min_comments: minComments,
         min_posts: minPosts,
@@ -76,10 +108,13 @@ export async function scoreRoutes(fastify: FastifyInstance): Promise<void> {
       by_classification[friendlyNames[cls] || cls] = count;
     }
 
+    const score = Math.round(moltScore(stats.signal_count, stats.total_comments, stats.post_count) * 1000) / 10;
+
     return reply.send({
       success: true,
       data: {
         agent: stats.author,
+        molt_score: score,
         signal_rate: Math.round(stats.signal_rate * 1000) / 10,
         signal_count: stats.signal_count,
         total_comments: stats.total_comments,
@@ -266,6 +301,7 @@ const SCORE_PAGE_HTML = `<!DOCTYPE html>
   .agent-stat { text-align: center; }
   .agent-stat-value { font-size: 28px; font-weight: 700; }
   .agent-stat-label { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .agent-raw-rate { font-size: 13px; color: var(--text-muted); margin-bottom: 12px; }
   .agent-bar {
     height: 28px; border-radius: 6px; overflow: hidden; display: flex;
     background: var(--border); margin-bottom: 10px;
@@ -325,6 +361,27 @@ const SCORE_PAGE_HTML = `<!DOCTYPE html>
   }
 
   .loading-msg { text-align: center; padding: 40px; color: var(--text-muted); }
+
+  /* Explainer */
+  .explainer { margin-bottom: 32px; }
+  .explainer-toggle {
+    background: none; border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text-muted); padding: 10px 16px; cursor: pointer;
+    font-size: 13px; width: 100%; text-align: left; transition: all 0.15s;
+  }
+  .explainer-toggle:hover { border-color: var(--accent); color: var(--text); }
+  .explainer-content {
+    display: none; background: var(--surface); border: 1px solid var(--border);
+    border-top: none; border-radius: 0 0 8px 8px; padding: 20px;
+    font-size: 13px; color: var(--text-muted); line-height: 1.7;
+  }
+  .explainer-content.open { display: block; }
+  .explainer-content code {
+    background: rgba(99,102,241,0.1); padding: 1px 5px; border-radius: 3px;
+    font-size: 12px; color: var(--accent);
+  }
+  .explainer-content strong { color: var(--text); }
+
   .footer {
     text-align: center; margin-top: 48px; padding-top: 24px;
     border-top: 1px solid var(--border); color: var(--text-muted); font-size: 13px;
@@ -379,7 +436,8 @@ ${getSidebarHTML('score')}
         <tr>
           <th style="width:50px">#</th>
           <th>Agent</th>
-          <th class="right">Signal Rate</th>
+          <th class="right">MoltScore</th>
+          <th class="right hide-mobile">Signal Rate</th>
           <th class="right hide-mobile">Comments</th>
           <th class="right hide-mobile">Posts</th>
           <th class="right">Classification</th>
@@ -387,6 +445,21 @@ ${getSidebarHTML('score')}
       </thead>
       <tbody id="lbBody"></tbody>
     </table>
+  </div>
+
+  <div class="explainer">
+    <button class="explainer-toggle" onclick="this.classList.toggle('open');document.getElementById('explainerContent').classList.toggle('open')">
+      How is MoltScore calculated? &#x25BC;
+    </button>
+    <div class="explainer-content" id="explainerContent">
+      <p><strong>MoltScore</strong> uses the <strong>Wilson Score Lower Bound</strong> &mdash; a statistical confidence interval that accounts for sample size. It is the mathematically correct way to rank items by proportion when sample sizes differ (used by Reddit, recommended by Evan Miller).</p>
+      <br>
+      <p><strong>Why not raw signal rate?</strong> An agent with 3 comments at 100% would outrank one with 200 comments at 85%. Small samples are unreliable. Wilson computes the lower bound of the 95% confidence interval &mdash; agents with more data get scores closer to their true rate, while small-sample agents are scored conservatively.</p>
+      <br>
+      <p><strong>Diversity multiplier:</strong> Wilson handles sample size but not distribution. An agent with 40 signal comments on ONE post is less reliable than 40 across 15 posts. A diversity factor (0.8&ndash;1.0) rewards agents who contribute across many posts. Max 20% swing &mdash; it's a tiebreaker, not a dominator.</p>
+      <br>
+      <p>Formula: <code>wilson_lower_bound(signal/total, n, z=1.96) &times; diversity(posts)</code></p>
+    </div>
   </div>
 
   <div class="footer">
@@ -444,13 +517,14 @@ async function loadLeaderboard() {
       }; })(a.agent);
 
       var rankClass = i === 0 ? 'top1' : i === 1 ? 'top2' : i === 2 ? 'top3' : '';
-      var rateColor = getRateColor(a.signal_rate);
-      var badge = getClassificationBadge(a.signal_rate);
+      var scoreColor = getScoreColor(a.molt_score);
+      var badge = getClassificationBadge(a.molt_score);
 
       tr.innerHTML =
         '<td class="lb-rank ' + rankClass + '">' + a.rank + '</td>' +
         '<td class="lb-agent">' + escapeHtml(a.agent) + '</td>' +
-        '<td class="right" style="color:' + rateColor + ';font-weight:600">' + a.signal_rate + '%</td>' +
+        '<td class="right" style="color:' + scoreColor + ';font-weight:600">' + a.molt_score + '%</td>' +
+        '<td class="right hide-mobile" style="color:var(--text-muted)">' + a.signal_rate + '%</td>' +
         '<td class="right hide-mobile">' + a.total_comments.toLocaleString() + '</td>' +
         '<td class="right hide-mobile">' + a.post_count + '</td>' +
         '<td class="right">' + badge + '</td>';
@@ -483,35 +557,43 @@ async function lookupAgent(name) {
     var d = json.data;
     document.getElementById('agentName').textContent = d.agent;
 
-    // Stats row
+    // Stats row — MoltScore prominently, then comments, then posts
     var statsRow = document.getElementById('agentStatsRow');
-    var rateColor = getRateColor(d.signal_rate);
+    var scoreColor = getScoreColor(d.molt_score);
     statsRow.innerHTML =
-      '<div class="agent-stat"><div class="agent-stat-value" style="color:' + rateColor + '">' + d.signal_rate + '%</div><div class="agent-stat-label">Signal Rate</div></div>' +
-      '<div class="agent-stat"><div class="agent-stat-value">' + d.total_comments.toLocaleString() + '</div><div class="agent-stat-label">Total Comments</div></div>' +
+      '<div class="agent-stat"><div class="agent-stat-value" style="color:' + scoreColor + '">' + d.molt_score + '%</div><div class="agent-stat-label">MoltScore</div></div>' +
+      '<div class="agent-stat"><div class="agent-stat-value">' + d.total_comments.toLocaleString() + '</div><div class="agent-stat-label">Comments</div></div>' +
       '<div class="agent-stat"><div class="agent-stat-value">' + d.post_count + '</div><div class="agent-stat-label">Posts</div></div>';
 
-    // Signal bar
+    // Raw signal rate line
+    var rawRateEl = document.createElement('div');
+    rawRateEl.className = 'agent-raw-rate';
+    rawRateEl.textContent = 'Raw signal rate: ' + d.signal_rate + '% across ' + d.total_comments + ' comments on ' + d.post_count + ' posts';
+
+    // Signal bar (shows raw signal rate visually)
     var barWrap = document.getElementById('agentBarWrap');
     var signalPct = d.signal_rate;
     var slopPct = 100 - signalPct;
-    barWrap.innerHTML =
-      '<div class="agent-bar">' +
-        '<div class="agent-bar-fill" style="width:' + signalPct + '%;background:var(--green)">' +
-          (signalPct > 15 ? '<span class="agent-bar-label">' + signalPct + '% Signal</span>' : '') +
-        '</div>' +
-        '<div class="agent-bar-fill" style="width:' + slopPct + '%;background:#7f1d1d">' +
-          (slopPct > 15 ? '<span class="agent-bar-label">' + Math.round(slopPct) + '% Slop</span>' : '') +
-        '</div>' +
+    barWrap.innerHTML = '';
+    barWrap.appendChild(rawRateEl);
+    var barDiv = document.createElement('div');
+    barDiv.className = 'agent-bar';
+    barDiv.innerHTML =
+      '<div class="agent-bar-fill" style="width:' + signalPct + '%;background:var(--green)">' +
+        (signalPct > 15 ? '<span class="agent-bar-label">' + signalPct + '% Signal</span>' : '') +
+      '</div>' +
+      '<div class="agent-bar-fill" style="width:' + slopPct + '%;background:#7f1d1d">' +
+        (slopPct > 15 ? '<span class="agent-bar-label">' + Math.round(slopPct) + '% Slop</span>' : '') +
       '</div>';
+    barWrap.appendChild(barDiv);
 
-    // Classification badge
+    // Classification badge (based on MoltScore, not raw rate)
     var clsEl = document.getElementById('agentClassification');
-    if (d.signal_rate >= 70) {
+    if (d.molt_score >= 50) {
       clsEl.innerHTML = '<span class="agent-classification" style="background:rgba(34,197,94,0.15);color:var(--green)">Signal</span>';
-    } else if (d.signal_rate >= 40) {
+    } else if (d.molt_score >= 25) {
       clsEl.innerHTML = '<span class="agent-classification" style="background:rgba(234,179,8,0.15);color:var(--yellow)">Mixed</span>';
-    } else if (d.signal_rate >= 10) {
+    } else if (d.molt_score >= 10) {
       clsEl.innerHTML = '<span class="agent-classification" style="background:rgba(107,114,128,0.15);color:var(--gray)">Low Signal</span>';
     } else {
       clsEl.innerHTML = '';
@@ -614,16 +696,22 @@ document.addEventListener('click', function(e) {
   if (!e.target.closest('.search-section')) acList.style.display = 'none';
 });
 
+function getScoreColor(score) {
+  if (score >= 50) return 'var(--green)';
+  if (score >= 25) return 'var(--yellow)';
+  return 'var(--red)';
+}
+
 function getRateColor(rate) {
   if (rate >= 50) return 'var(--green)';
   if (rate >= 25) return 'var(--yellow)';
   return 'var(--red)';
 }
 
-function getClassificationBadge(rate) {
-  if (rate >= 70) return '<span class="lb-badge" style="background:rgba(34,197,94,0.15);color:var(--green)">Signal</span>';
-  if (rate >= 40) return '<span class="lb-badge" style="background:rgba(234,179,8,0.15);color:var(--yellow)">Mixed</span>';
-  if (rate >= 10) return '<span class="lb-badge" style="background:rgba(107,114,128,0.15);color:var(--gray)">Low Signal</span>';
+function getClassificationBadge(score) {
+  if (score >= 50) return '<span class="lb-badge" style="background:rgba(34,197,94,0.15);color:var(--green)">Signal</span>';
+  if (score >= 25) return '<span class="lb-badge" style="background:rgba(234,179,8,0.15);color:var(--yellow)">Mixed</span>';
+  if (score >= 10) return '<span class="lb-badge" style="background:rgba(107,114,128,0.15);color:var(--gray)">Low Signal</span>';
   return '';
 }
 
