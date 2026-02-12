@@ -22,7 +22,7 @@ import { noiseRoutes } from './routes/noise.js';
 import { scoreRoutes } from './routes/score.js';
 import { adminRoutes } from './routes/admin.js';
 import { detectFallenAgents } from './services/trust-calculator.js';
-import { takeClassificationSnapshot, rescanOldPosts, discoverNewPosts } from './services/temporal-snapshots.js';
+import { takeClassificationSnapshot, rescanOldPosts, discoverNewPosts, bulkScanAllCommunities, isScannerBusy } from './services/temporal-snapshots.js';
 
 async function main() {
   // Load configuration
@@ -258,6 +258,25 @@ async function main() {
       runRescan();
       setInterval(runRescan, 2 * 60 * 60 * 1000);
     }, 6 * 60 * 60 * 1000);
+
+    // One-time bulk scan: deep-scan all submolts to catch up on backlog
+    // Retry up to 3 times if the scanner is busy
+    setTimeout(async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (!isScannerBusy()) {
+          try {
+            const result = await bulkScanAllCommunities();
+            fastify.log.info(result, 'Bulk scan of all communities completed');
+          } catch (err) {
+            fastify.log.error(err, 'Failed to bulk scan communities');
+          }
+          return;
+        }
+        fastify.log.info(`Bulk scan waiting for scanner (attempt ${attempt + 1}/3)`);
+        await new Promise(r => setTimeout(r, 10 * 60 * 1000)); // wait 10 min
+      }
+      fastify.log.warn('Bulk scan gave up after 3 attempts — scanner stayed busy');
+    }, 5 * 60 * 1000); // 5 minutes after startup
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

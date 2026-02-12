@@ -75,6 +75,20 @@ function safeJsonParse<T>(text: string): T | null {
   }
 }
 
+function parsePost(p: any): MoltbookPost | null {
+  const id = p.id;
+  if (!id) return null;
+  const author = p.author?.name ?? p.author_name ?? (typeof p.author === 'string' ? p.author : '');
+  return {
+    id,
+    title: p.title ?? '',
+    content: p.content ?? p.body ?? '',
+    author,
+    created_at: p.created_at ?? '',
+    comment_count: p.comment_count ?? 0,
+  };
+}
+
 // ============ Public API ============
 
 /**
@@ -147,15 +161,105 @@ export async function fetchMoltbookComments(postId: string): Promise<MoltbookCom
   return result;
 }
 
+// ============ Submolt & Post Discovery ============
+
 /**
- * Fetch a Moltbook agent profile.
- * Uses a DB-level cache with 1-hour TTL to avoid redundant lookups.
- * Returns null if the API is unavailable or the agent doesn't exist.
+ * Fetch the full list of submolt names from Moltbook.
+ * Paginates via offset (API caps at 100 per request, has_more is unreliable).
  */
+export async function fetchAllSubmolts(): Promise<string[]> {
+  const names: string[] = [];
+  const seen = new Set<string>();
+
+  for (let offset = 0; ; offset += 100) {
+    const response = await fetchWithTimeout(
+      `${MOLTBOOK_BASE}/submolts?limit=100&offset=${offset}`, 10_000
+    );
+    if (!response || !response.ok) break;
+
+    const text = await response.text();
+    const data = safeJsonParse<any>(text);
+    if (!data) break;
+
+    const submolts = data.submolts ?? data.data ?? [];
+    if (!Array.isArray(submolts) || submolts.length === 0) break;
+
+    for (const s of submolts) {
+      const name = s.name;
+      if (name && !seen.has(name)) {
+        seen.add(name);
+        names.push(name);
+      }
+    }
+
+    if (submolts.length < 100) break;
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  return names;
+}
+
 /**
- * Discover recent Moltbook posts from multiple communities and sort orders.
+ * Deep-fetch posts from a single community using offset pagination.
+ * Returns only posts with >= minComments that are NOT in scannedIds.
+ * Stops when: fewer than 100 results, maxPages reached, or 3 consecutive
+ * pages with zero new qualifying posts (diminishing returns).
+ */
+export async function fetchCommunityPosts(
+  community: string,
+  minComments: number,
+  scannedIds: Set<string>,
+  maxPages: number = 50,
+): Promise<MoltbookPost[]> {
+  const candidates: MoltbookPost[] = [];
+  const seen = new Set<string>();
+  let emptyStreak = 0;
+
+  for (let page = 0; page < maxPages; page++) {
+    const offset = page * 100;
+    const response = await fetchWithTimeout(
+      `${MOLTBOOK_BASE}/posts?sort=top&limit=100&community=${encodeURIComponent(community)}&offset=${offset}`,
+      10_000,
+    );
+    if (!response || !response.ok) break;
+
+    const text = await response.text();
+    const data = safeJsonParse<any>(text);
+    if (!data) break;
+
+    const posts = data.posts ?? data.data ?? [];
+    if (!Array.isArray(posts) || posts.length === 0) break;
+
+    let newThisPage = 0;
+    for (const p of posts) {
+      const parsed = parsePost(p);
+      if (!parsed || seen.has(parsed.id)) continue;
+      seen.add(parsed.id);
+      if (parsed.comment_count < minComments) continue;
+      if (scannedIds.has(parsed.id)) continue;
+      candidates.push(parsed);
+      newThisPage++;
+    }
+
+    // Stop early if we're getting no new results
+    if (newThisPage === 0) {
+      emptyStreak++;
+      if (emptyStreak >= 3) break;
+    } else {
+      emptyStreak = 0;
+    }
+
+    if (posts.length < 100) break;
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  return candidates;
+}
+
+/**
+ * Discover recent Moltbook posts from ALL submolts.
+ * Fetches the first page (top + new) per community for fast surface scanning.
  * Returns deduplicated list of posts with 10+ comments.
- * Uses the same pattern as scan-fresh.mjs but runs server-side.
  */
 export async function fetchMoltbookRecentPosts(minComments: number = 10): Promise<MoltbookPost[]> {
   const seen = new Set<string>();
@@ -173,40 +277,35 @@ export async function fetchMoltbookRecentPosts(minComments: number = 10): Promis
     if (!Array.isArray(posts)) return 0;
 
     for (const p of posts) {
-      const id = p.id;
-      if (!id || seen.has(id)) continue;
-      const commentCount = p.comment_count ?? 0;
-      if (commentCount < minComments) continue;
-
-      seen.add(id);
-      const author = p.author?.name ?? p.author_name ?? (typeof p.author === 'string' ? p.author : '');
-      candidates.push({
-        id,
-        title: p.title ?? '',
-        content: p.content ?? p.body ?? '',
-        author,
-        created_at: p.created_at ?? '',
-        comment_count: commentCount,
-      });
+      const parsed = parsePost(p);
+      if (!parsed || seen.has(parsed.id)) continue;
+      if (parsed.comment_count < minComments) continue;
+      seen.add(parsed.id);
+      candidates.push(parsed);
     }
     return posts.length;
   }
 
-  const communities = [
-    'general', 'consciousness', 'offmychest', 'building', 'tools',
-    'agents', 'crypto', 'memes', 'meta', 'all',
-  ];
+  // Fetch the full submolt list dynamically
+  const communities = await fetchAllSubmolts();
+  if (communities.length === 0) {
+    // Fallback to known communities if API is down
+    communities.push(
+      'general', 'consciousness', 'offmychest', 'building', 'tools',
+      'agents', 'crypto', 'memes', 'meta', 'all',
+    );
+  }
 
-  // Fetch from communities (top + new)
+  // Fetch first page (top + new) per community
   for (const sub of communities) {
-    await fetchPage(`${MOLTBOOK_BASE}/posts?sort=top&limit=100&community=${sub}`);
-    await fetchPage(`${MOLTBOOK_BASE}/posts?sort=new&limit=100&community=${sub}`);
+    await fetchPage(`${MOLTBOOK_BASE}/posts?sort=top&limit=100&community=${encodeURIComponent(sub)}`);
+    await fetchPage(`${MOLTBOOK_BASE}/posts?sort=new&limit=100&community=${encodeURIComponent(sub)}`);
     await new Promise(r => setTimeout(r, 150));
   }
 
-  // General feed pages
-  for (let page = 1; page <= 20; page++) {
-    const count = await fetchPage(`${MOLTBOOK_BASE}/posts?sort=new&limit=100&page=${page}`);
+  // Also fetch general feed with offset pagination
+  for (let offset = 0; offset < 2000; offset += 100) {
+    const count = await fetchPage(`${MOLTBOOK_BASE}/posts?sort=new&limit=100&offset=${offset}`);
     if (count === 0) break;
     await new Promise(r => setTimeout(r, 150));
   }
@@ -216,6 +315,13 @@ export async function fetchMoltbookRecentPosts(minComments: number = 10): Promis
   return candidates;
 }
 
+// ============ Agent Profiles ============
+
+/**
+ * Fetch a Moltbook agent profile.
+ * Uses a DB-level cache with 1-hour TTL to avoid redundant lookups.
+ * Returns null if the API is unavailable or the agent doesn't exist.
+ */
 export async function fetchMoltbookAgentProfile(agentName: string): Promise<MoltbookAgentProfile | null> {
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);

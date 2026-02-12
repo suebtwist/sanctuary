@@ -10,7 +10,7 @@
 
 import { getDb } from '../db/index.js';
 import { analyzePost } from './noise-classifier.js';
-import { fetchMoltbookRecentPosts } from './moltbook-client.js';
+import { fetchMoltbookRecentPosts, fetchAllSubmolts, fetchCommunityPosts } from './moltbook-client.js';
 
 // ============ MoltScore (duplicated from score.ts to avoid circular imports) ============
 
@@ -224,6 +224,96 @@ export async function discoverNewPosts(): Promise<{
   }
 
   return { found, scanned, failed };
+}
+
+// ============ Bulk Scan All Communities ============
+
+/**
+ * One-time deep scan of ALL Moltbook submolts.
+ * Paginates each community for posts with 10+ comments not yet in our DB.
+ * Uses the shared scan mutex — will not run if discovery or rescan is active.
+ */
+export async function bulkScanAllCommunities(): Promise<{
+  communities: number; found: number; scanned: number; failed: number;
+}> {
+  if (scannerBusy) {
+    console.log('[bulk] Scanner busy, cannot start bulk scan');
+    return { communities: 0, found: 0, scanned: 0, failed: 0 };
+  }
+
+  scannerBusy = true;
+  scanStopRequested = false;
+
+  let totalFound = 0;
+  let totalScanned = 0;
+  let totalFailed = 0;
+  let communitiesProcessed = 0;
+  let backoffMs = 2500;
+
+  try {
+    const db = getDb();
+    const scannedIds = new Set(db.getScannedPostIds());
+    console.log(`[bulk] Loaded ${scannedIds.size} already-scanned post IDs`);
+
+    const submolts = await fetchAllSubmolts();
+    if (submolts.length === 0) {
+      console.log('[bulk] Could not fetch submolt list');
+      return { communities: 0, found: 0, scanned: 0, failed: 0 };
+    }
+    console.log(`[bulk] Starting deep scan of ${submolts.length} submolts`);
+
+    for (const sub of submolts) {
+      if (scanStopRequested) {
+        console.log(`[bulk] Stop requested after ${communitiesProcessed} communities`);
+        break;
+      }
+
+      const newPosts = await fetchCommunityPosts(sub, 10, scannedIds, 50);
+      communitiesProcessed++;
+
+      if (newPosts.length === 0) continue;
+
+      totalFound += newPosts.length;
+      console.log(`[bulk] m/${sub}: ${newPosts.length} new posts found, scanning...`);
+
+      let subScanned = 0;
+      let subFailed = 0;
+
+      for (const post of newPosts) {
+        if (scanStopRequested) break;
+
+        try {
+          const result = await analyzePost(post.id);
+          if (result) {
+            subScanned++;
+            totalScanned++;
+            scannedIds.add(post.id); // prevent re-scanning in later communities
+            backoffMs = 2500;
+          }
+        } catch (e: any) {
+          subFailed++;
+          totalFailed++;
+          if (e?.message?.includes('429') || e?.message?.includes('rate')) {
+            backoffMs = Math.min(backoffMs * 2, 60000);
+            console.warn(`[bulk] Rate limited, backing off to ${backoffMs}ms`);
+          }
+          console.error(`[bulk] Failed ${post.id.slice(0, 8)}:`, e?.message || e);
+        }
+
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+      }
+
+      if (subScanned > 0 || subFailed > 0) {
+        console.log(`[bulk] m/${sub}: done (scanned ${subScanned}, failed ${subFailed})`);
+      }
+    }
+
+    console.log(`[bulk] Complete. Communities: ${communitiesProcessed}, Found: ${totalFound}, Scanned: ${totalScanned}, Failed: ${totalFailed}`);
+  } finally {
+    scannerBusy = false;
+  }
+
+  return { communities: communitiesProcessed, found: totalFound, scanned: totalScanned, failed: totalFailed };
 }
 
 // ============ Backward-compatible exports ============
