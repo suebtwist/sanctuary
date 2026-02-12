@@ -1735,6 +1735,8 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_date ON classification_snapshots(snapsho
 
   /**
    * Get the most recent classified comments for the live activity feed.
+   * Returns diverse results: one row per (author, post_id) combo,
+   * so a single post being scanned doesn't flood the feed.
    */
   getRecentClassifications(limit: number = 10): Array<{
     author: string;
@@ -1746,9 +1748,10 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_date ON classification_snapshots(snapsho
     if (!latestVersion) return [];
 
     return this.db.prepare(`
-      SELECT author, classification, post_title, classified_at
+      SELECT author, classification, post_title, MAX(classified_at) as classified_at
       FROM classified_comments
       WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+      GROUP BY author, post_id
       ORDER BY classified_at DESC
       LIMIT ?
     `).all(latestVersion, limit) as Array<{
