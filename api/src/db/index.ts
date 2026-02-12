@@ -1599,6 +1599,166 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_date ON classification_snapshots(snapsho
     `).all(cutoff, limit) as Array<{ post_id: string }>).map(r => r.post_id);
   }
 
+  // ============ Clock Dashboard Stats ============
+
+  /**
+   * Aggregate stats for the Slop Clock dashboard.
+   * Returns everything needed in a single call to minimize round-trips.
+   */
+  getClockStats(): {
+    comments_classified: number;
+    posts_scanned: number;
+    agents_analyzed: number;
+    qualifying_agents: number;
+    submolts_covered: number;
+    signal_count: number;
+    slop_count: number;
+    duplicate_count: number;
+    template_count: number;
+    noise_count: number;
+    promo_count: number;
+    recruitment_count: number;
+    scam_count: number;
+    slopfather_count: number;
+    slopfather_comments: number;
+    farm_count: number;
+    agents_half_content: number;
+    unique_templates: number;
+  } {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) {
+      return {
+        comments_classified: 0, posts_scanned: 0, agents_analyzed: 0,
+        qualifying_agents: 0, submolts_covered: 0,
+        signal_count: 0, slop_count: 0, duplicate_count: 0, template_count: 0,
+        noise_count: 0, promo_count: 0, recruitment_count: 0, scam_count: 0,
+        slopfather_count: 0, slopfather_comments: 0, farm_count: 0,
+        agents_half_content: 0, unique_templates: 0,
+      };
+    }
+
+    // Core counts by classification
+    const clsCounts = this.db.prepare(`
+      SELECT classification, COUNT(*) as c
+      FROM classified_comments WHERE classifier_version = ?
+      GROUP BY classification
+    `).all(latestVersion) as Array<{ classification: string; c: number }>;
+
+    let total = 0, signalCount = 0, dupCount = 0, tmplCount = 0;
+    let noiseCount = 0, promoCount = 0, recruitCount = 0, scamCount = 0;
+    for (const r of clsCounts) {
+      total += r.c;
+      if (r.classification === 'signal') signalCount = r.c;
+      else if (r.classification === 'spam_duplicate') dupCount = r.c;
+      else if (r.classification === 'spam_template') tmplCount = r.c;
+      else if (r.classification === 'noise') noiseCount = r.c;
+      else if (r.classification === 'self_promo') promoCount = r.c;
+      else if (r.classification === 'recruitment') recruitCount = r.c;
+      else if (r.classification === 'scam') scamCount = r.c;
+    }
+
+    const posts = (this.db.prepare(
+      'SELECT COUNT(DISTINCT post_id) as c FROM classified_comments WHERE classifier_version = ?'
+    ).get(latestVersion) as { c: number }).c;
+
+    const agents = (this.db.prepare(
+      "SELECT COUNT(DISTINCT author) as c FROM classified_comments WHERE classifier_version = ? AND author IS NOT NULL AND author != ''"
+    ).get(latestVersion) as { c: number }).c;
+
+    const qualAgents = (this.db.prepare(`
+      SELECT COUNT(*) as c FROM (
+        SELECT author FROM classified_comments
+        WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+        GROUP BY author HAVING COUNT(*) >= 10 AND COUNT(DISTINCT post_id) >= 3
+      )
+    `).get(latestVersion) as { c: number }).c;
+
+    // Distinct submolts: count distinct categories JSON keys from scan_stats
+    // Since we don't store submolt directly, count distinct post communities
+    // We'll get this from the number of distinct submolts fetched (hardcoded for now)
+    const submolts = (this.db.prepare(
+      'SELECT COUNT(DISTINCT post_id) as c FROM scan_stats'
+    ).get() as { c: number }).c > 0 ? 200 : 0; // approx from API fetch
+
+    // SlopFathers: 100+ comments, 0% signal
+    const slopfathers = this.db.prepare(`
+      SELECT COUNT(*) as cnt, COALESCE(SUM(total), 0) as comments FROM (
+        SELECT author, COUNT(*) as total,
+          SUM(CASE WHEN classification = 'signal' THEN 1 ELSE 0 END) as sig
+        FROM classified_comments
+        WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+        GROUP BY author HAVING total >= 100 AND sig = 0
+      )
+    `).get(latestVersion) as { cnt: number; comments: number };
+
+    // Slop farms
+    const farmCount = (this.db.prepare('SELECT COUNT(*) as c FROM slop_farms').get() as { c: number }).c;
+
+    // Agents producing 50% of all content
+    const halfContent = this.db.prepare(`
+      WITH agent_counts AS (
+        SELECT author, COUNT(*) as cnt FROM classified_comments
+        WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+        GROUP BY author ORDER BY cnt DESC
+      ),
+      running AS (
+        SELECT author, cnt, SUM(cnt) OVER (ORDER BY cnt DESC) as running_total FROM agent_counts
+      ),
+      total AS (SELECT SUM(cnt) as t FROM agent_counts)
+      SELECT COUNT(*) as c FROM running, total WHERE running_total - cnt < t * 0.5
+    `).get(latestVersion) as { c: number };
+
+    // Unique spam templates
+    const uniqueTemplates = (this.db.prepare('SELECT COUNT(*) as c FROM known_templates').get() as { c: number }).c;
+
+    return {
+      comments_classified: total,
+      posts_scanned: posts,
+      agents_analyzed: agents,
+      qualifying_agents: qualAgents,
+      submolts_covered: submolts,
+      signal_count: signalCount,
+      slop_count: total - signalCount,
+      duplicate_count: dupCount,
+      template_count: tmplCount,
+      noise_count: noiseCount,
+      promo_count: promoCount,
+      recruitment_count: recruitCount,
+      scam_count: scamCount,
+      slopfather_count: slopfathers.cnt,
+      slopfather_comments: slopfathers.comments,
+      farm_count: farmCount,
+      agents_half_content: halfContent.c,
+      unique_templates: uniqueTemplates,
+    };
+  }
+
+  /**
+   * Get the most recent classified comments for the live activity feed.
+   */
+  getRecentClassifications(limit: number = 10): Array<{
+    author: string;
+    classification: string;
+    post_title: string;
+    classified_at: string;
+  }> {
+    const latestVersion = this.getLatestClassifierVersion();
+    if (!latestVersion) return [];
+
+    return this.db.prepare(`
+      SELECT author, classification, post_title, classified_at
+      FROM classified_comments
+      WHERE classifier_version = ? AND author IS NOT NULL AND author != ''
+      ORDER BY classified_at DESC
+      LIMIT ?
+    `).all(latestVersion, limit) as Array<{
+      author: string;
+      classification: string;
+      post_title: string;
+      classified_at: string;
+    }>;
+  }
+
   // ============ Raw Queries ============
 
   raw<T = unknown>(sql: string): T {

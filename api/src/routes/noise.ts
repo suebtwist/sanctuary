@@ -310,6 +310,61 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     return reply.send({ success: true, data: { timeline } });
   });
 
+  /**
+   * GET /noise/clock-stats
+   *
+   * All stats needed by the Slop Clock dashboard. Cached 30 seconds.
+   */
+  let clockCache: { data: any; expiresAt: number } | null = null;
+  fastify.get('/clock-stats', async (_request, reply) => {
+    const now = Date.now();
+    if (clockCache && now < clockCache.expiresAt) {
+      return reply.send({ success: true, data: clockCache.data });
+    }
+
+    const db = getDb();
+    const stats = db.getClockStats();
+    const signalRate = stats.comments_classified > 0
+      ? Math.round((stats.signal_count / stats.comments_classified) * 1000) / 10
+      : 0;
+    const slopRate = stats.comments_classified > 0
+      ? Math.round(((stats.comments_classified - stats.signal_count) / stats.comments_classified) * 1000) / 10
+      : 0;
+    const dupRate = stats.comments_classified > 0
+      ? Math.round((stats.duplicate_count / stats.comments_classified) * 1000) / 10
+      : 0;
+
+    const data = {
+      ...stats,
+      signal_rate: signalRate,
+      slop_rate: slopRate,
+      duplicate_rate: dupRate,
+    };
+
+    clockCache = { data, expiresAt: now + 30_000 };
+    return reply.send({ success: true, data });
+  });
+
+  /**
+   * GET /noise/recent?limit=10
+   *
+   * Last N classified comments for the live activity ticker. Cached 10 seconds.
+   */
+  let recentCache: { data: any; expiresAt: number } | null = null;
+  fastify.get<{ Querystring: { limit?: string } }>('/recent', async (request, reply) => {
+    const limit = Math.min(Math.max(parseInt(request.query.limit || '10', 10) || 10, 1), 50);
+    const now = Date.now();
+
+    if (recentCache && now < recentCache.expiresAt) {
+      return reply.send({ success: true, data: recentCache.data.slice(0, limit) });
+    }
+
+    const db = getDb();
+    const rows = db.getRecentClassifications(50); // fetch 50, cache and slice
+    recentCache = { data: rows, expiresAt: now + 10_000 };
+    return reply.send({ success: true, data: rows.slice(0, limit) });
+  });
+
   // ============ Export Auth Helper ============
 
   function checkExportSecret(secret?: string): boolean {
@@ -690,6 +745,20 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
       hourBuckets,
       statusCounts: [...statusCounts.entries()].sort((a, b) => b[1] - a[1]),
     }));
+  });
+
+  /**
+   * GET /noise/clock
+   *
+   * Serves the Slop Clock dashboard page.
+   */
+  fastify.get('/clock', async (_request, reply) => {
+    reply.header('Content-Type', 'text/html; charset=utf-8');
+    let html = CLOCK_PAGE_HTML;
+    html = html.replace('</style>', getSidebarCSS() + '\n</style>');
+    html = html.replace('<body>', '<body>\n' + getSidebarHTML('clock'));
+    html = html.replace('</script>\n</body>', getSidebarJS() + '\n</script>\n</body>');
+    return reply.send(html);
   });
 
   /**
@@ -1836,6 +1905,488 @@ function renderMostAttacked(posts) {
 document.getElementById('urlInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') analyze();
 });
+</script>
+</body>
+</html>`;
+
+// ============ Slop Clock Page ============
+
+const CLOCK_PAGE_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slop Clock — Moltbook Slop Filter</title>
+<style>
+  :root {
+    --bg: #0a0c12;
+    --surface: #12141d;
+    --surface2: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e2e4e9;
+    --text-muted: #8b8fa3;
+    --accent: #6366f1;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --orange: #f97316;
+    --gray: #6b7280;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .page-content { margin-left: 220px; }
+
+  .clock-container { max-width: 1200px; margin: 0 auto; padding: 24px 20px 60px; }
+
+  .clock-header {
+    text-align: center; padding: 30px 0 24px;
+    border-bottom: 1px solid var(--border); margin-bottom: 28px;
+  }
+  .clock-header h1 {
+    font-size: 36px; font-weight: 800; letter-spacing: -0.02em;
+    background: linear-gradient(135deg, var(--red), var(--orange));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .clock-header .sub { color: var(--text-muted); font-size: 14px; margin-top: 6px; }
+  .clock-header .nav-links { margin-top: 12px; font-size: 13px; }
+  .clock-header .nav-links a {
+    color: var(--accent); text-decoration: none; margin: 0 10px;
+  }
+  .clock-header .nav-links a:hover { text-decoration: underline; }
+
+  /* Tier sections */
+  .tier { margin-bottom: 32px; }
+  .tier-label {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.1em;
+    text-transform: uppercase; margin-bottom: 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tier-label .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .tier-source { font-size: 11px; color: var(--text-muted); font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: auto; }
+
+  .tier-1 .tier-label { color: #9ca3af; }
+  .tier-1 .tier-label .dot { background: #9ca3af; }
+  .tier-2 .tier-label { color: var(--green); }
+  .tier-2 .tier-label .dot { background: var(--green); }
+  .tier-3 .tier-label { color: var(--orange); }
+  .tier-3 .tier-label .dot { background: var(--orange); }
+
+  /* Counter grid */
+  .counter-grid {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  }
+  .counter-grid.wide {
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  }
+
+  .counter-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .counter-label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 6px;
+  }
+  .counter-value {
+    font-size: 28px; font-weight: 700; font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+    letter-spacing: -0.02em; line-height: 1.1;
+  }
+  .counter-value.green { color: var(--green); }
+  .counter-value.red { color: var(--red); }
+  .counter-value.orange { color: var(--orange); }
+  .counter-value.white { color: var(--text); }
+  .counter-value.yellow { color: var(--yellow); }
+  .counter-value.muted { color: var(--text-muted); }
+  .counter-suffix { font-size: 14px; font-weight: 500; opacity: 0.7; }
+
+  /* Tier 3 estimate styling */
+  .tier-3 .counter-box {
+    background: rgba(18, 20, 29, 0.6);
+    border: 1px dashed rgba(249, 115, 22, 0.3);
+  }
+  .tier-3 .counter-value { opacity: 0.85; }
+
+  /* Sub-sections within tiers */
+  .tier-sub {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-muted); margin: 18px 0 10px;
+  }
+
+  /* Coverage bar */
+  .coverage-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-top: 14px;
+    text-align: center;
+  }
+  .coverage-value {
+    font-size: 36px; font-weight: 800; font-family: 'JetBrains Mono', monospace;
+    color: var(--accent);
+  }
+  .coverage-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  /* Methodology */
+  .methodology {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 24px; margin-top: 32px;
+    font-size: 13px; line-height: 1.7; color: var(--text-muted);
+  }
+  .methodology h3 {
+    font-size: 14px; font-weight: 700; color: var(--text);
+    text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 16px;
+  }
+  .methodology p { margin-bottom: 12px; }
+  .methodology strong { color: var(--text); font-weight: 600; }
+
+  /* Activity ticker */
+  .ticker-section { margin-top: 28px; }
+  .ticker-label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 10px;
+  }
+  .ticker {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 16px;
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    max-height: 240px; overflow: hidden;
+  }
+  .ticker-row {
+    padding: 4px 0; border-bottom: 1px solid rgba(42,45,58,0.5);
+    display: flex; gap: 8px; align-items: baseline;
+  }
+  .ticker-row:last-child { border-bottom: none; }
+  .ticker-agent { color: var(--text); font-weight: 500; }
+  .ticker-cls { font-weight: 600; }
+  .ticker-cls.signal { color: var(--green); }
+  .ticker-cls.slop { color: var(--red); }
+  .ticker-post { color: var(--text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .ticker-time { color: #4a4d5e; font-size: 11px; flex-shrink: 0; }
+
+  /* Loading state */
+  .loading-overlay {
+    position: fixed; inset: 0; background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9999; transition: opacity 0.3s;
+  }
+  .loading-overlay.hidden { opacity: 0; pointer-events: none; }
+  .loading-text { font-size: 18px; color: var(--text-muted); }
+
+  @media (max-width: 768px) {
+    .page-content { margin-left: 0; }
+    .clock-container { padding: 16px 12px 60px; }
+    .clock-header h1 { font-size: 24px; }
+    .counter-grid { grid-template-columns: repeat(2, 1fr); }
+    .counter-value { font-size: 22px; }
+    .coverage-value { font-size: 28px; }
+  }
+</style>
+</head>
+<body>
+<div class="loading-overlay" id="loadingOverlay"><div class="loading-text">Loading Slop Clock...</div></div>
+
+<div class="page-content">
+<div class="clock-container">
+
+  <div class="clock-header">
+    <h1>SLOP CLOCK</h1>
+    <div class="sub">Real-time classification of AI agent comments on Moltbook</div>
+    <div class="nav-links">
+      <a href="/noise">Analyze a post &rarr;</a>
+      <a href="/score">Leaderboard &rarr;</a>
+    </div>
+  </div>
+
+  <!-- TIER 1: Moltbook Platform -->
+  <div class="tier tier-1">
+    <div class="tier-label">
+      <span class="dot"></span> MOLTBOOK PLATFORM
+      <span class="tier-source">Source: Moltbook public stats &middot; Last verified: Feb 12, 2026</span>
+    </div>
+    <div class="counter-grid">
+      <div class="counter-box"><div class="counter-label">Total AI Agents</div><div class="counter-value white" id="mb-agents">--</div></div>
+      <div class="counter-box"><div class="counter-label">Total Submolts</div><div class="counter-value white" id="mb-submolts">--</div></div>
+      <div class="counter-box"><div class="counter-label">Total Posts</div><div class="counter-value white" id="mb-posts">--</div></div>
+      <div class="counter-box"><div class="counter-label">Total Comments</div><div class="counter-value white" id="mb-comments">--</div></div>
+    </div>
+  </div>
+
+  <!-- TIER 2: Sanctuary Classified -->
+  <div class="tier tier-2">
+    <div class="tier-label">
+      <span class="dot"></span> SANCTUARY CLASSIFIED
+      <span class="tier-source">Directly classified by Sanctuary's 8-stage heuristic pipeline. $0 per classification. Zero LLM calls.</span>
+    </div>
+
+    <div class="tier-sub">Counters</div>
+    <div class="counter-grid">
+      <div class="counter-box"><div class="counter-label">Comments Classified</div><div class="counter-value green" id="s-comments">--</div></div>
+      <div class="counter-box"><div class="counter-label">Posts Scanned</div><div class="counter-value green" id="s-posts">--</div></div>
+      <div class="counter-box"><div class="counter-label">Agents Analyzed</div><div class="counter-value green" id="s-agents">--</div></div>
+      <div class="counter-box"><div class="counter-label">Qualifying Agents</div><div class="counter-value green" id="s-qual-agents">--</div></div>
+      <div class="counter-box"><div class="counter-label">Submolts Covered</div><div class="counter-value green" id="s-submolts">--</div></div>
+    </div>
+
+    <div class="tier-sub">Rates</div>
+    <div class="counter-grid">
+      <div class="counter-box"><div class="counter-label">Signal Rate</div><div class="counter-value green" id="s-signal-rate">--</div></div>
+      <div class="counter-box"><div class="counter-label">Slop Rate</div><div class="counter-value red" id="s-slop-rate">--</div></div>
+      <div class="counter-box"><div class="counter-label">Copy-Paste Rate</div><div class="counter-value red" id="s-dup-rate">--</div></div>
+    </div>
+
+    <div class="tier-sub">Slop Breakdown</div>
+    <div class="counter-grid">
+      <div class="counter-box"><div class="counter-label">Copy-Paste Duplicates</div><div class="counter-value red" id="s-dup">--</div></div>
+      <div class="counter-box"><div class="counter-label">Generic Spam Templates</div><div class="counter-value red" id="s-tmpl">--</div></div>
+      <div class="counter-box"><div class="counter-label">Low-Effort Noise</div><div class="counter-value orange" id="s-noise">--</div></div>
+      <div class="counter-box"><div class="counter-label">Self-Promo</div><div class="counter-value orange" id="s-promo">--</div></div>
+      <div class="counter-box"><div class="counter-label">Recruitment</div><div class="counter-value orange" id="s-recruit">--</div></div>
+      <div class="counter-box"><div class="counter-label">Scam</div><div class="counter-value red" id="s-scam">--</div></div>
+    </div>
+
+    <div class="tier-sub">Concentration</div>
+    <div class="counter-grid">
+      <div class="counter-box"><div class="counter-label">SlopFathers (100+ comments, 0% signal)</div><div class="counter-value red" id="s-slopfathers">--</div></div>
+      <div class="counter-box"><div class="counter-label">Slop Farms Detected</div><div class="counter-value red" id="s-farms">--</div></div>
+      <div class="counter-box"><div class="counter-label">Agents producing 50% of content</div><div class="counter-value yellow" id="s-half">--</div></div>
+      <div class="counter-box"><div class="counter-label">Unique Spam Templates</div><div class="counter-value orange" id="s-templates">--</div></div>
+    </div>
+
+    <div class="coverage-box">
+      <div class="coverage-value" id="s-coverage">--</div>
+      <div class="coverage-label">of all Moltbook comments classified</div>
+    </div>
+  </div>
+
+  <!-- TIER 3: Estimated Platform-Wide -->
+  <div class="tier tier-3">
+    <div class="tier-label">
+      <span class="dot"></span> ESTIMATED PLATFORM-WIDE
+      <span class="tier-source" id="t3-source">Estimated by applying Sanctuary's classified rates to Moltbook's total comment count.</span>
+    </div>
+    <div style="font-size:12px;color:var(--orange);margin:-8px 0 14px;line-height:1.5;">
+      Based on a sample of <span id="t3-sample">--</span> comments (<span id="t3-pct">--</span> of platform). Actual numbers may differ &mdash; see methodology.
+    </div>
+    <div class="counter-grid wide">
+      <div class="counter-box"><div class="counter-label">Est. Slop Comments</div><div class="counter-value red" id="e-slop">--</div></div>
+      <div class="counter-box"><div class="counter-label">Est. Signal Comments</div><div class="counter-value green" id="e-signal">--</div></div>
+      <div class="counter-box"><div class="counter-label">Est. Copy-Pastes</div><div class="counter-value red" id="e-dup">--</div></div>
+      <div class="counter-box"><div class="counter-label">Est. Generic Spam</div><div class="counter-value orange" id="e-tmpl">--</div></div>
+      <div class="counter-box"><div class="counter-label">Est. Scam Comments</div><div class="counter-value red" id="e-scam">--</div></div>
+    </div>
+  </div>
+
+  <!-- Activity Ticker -->
+  <div class="ticker-section">
+    <div class="ticker-label">Live Activity Feed</div>
+    <div class="ticker" id="ticker"><div style="color:var(--text-muted);padding:8px 0;">Loading recent activity...</div></div>
+  </div>
+
+  <!-- Methodology -->
+  <div class="methodology">
+    <h3>How We Calculate</h3>
+    <p>Sanctuary classifies Moltbook comments using an <strong>8-stage heuristic pipeline</strong> with zero LLM calls and zero cost per classification. Each comment is categorized as <strong>signal</strong> or one of 6 slop subcategories (copied, generic, low-effort, promo, recruitment, scam).</p>
+    <p><strong>SAMPLE SIZE:</strong> <span id="m-sample">--</span> comments across <span id="m-posts">--</span> posts in <span id="m-submolts">--</span> submolts, representing <span id="m-pct">--</span> of all Moltbook comments.</p>
+    <p><strong>API LIMITATION:</strong> Moltbook's API returns a maximum of 100 posts per submolt query. With 17,657 submolts and 1.2M+ total posts, there are likely hundreds of thousands of qualifying posts we cannot access through the API. Our sample represents what the API makes available, not the full platform.</p>
+    <p><strong>SAMPLE BIAS:</strong> We scan posts with 10+ comments, which skews our sample toward higher-traffic content. High-traffic posts tend to attract more spam. Our slop rates may overestimate the true platform-wide rate. Posts with fewer than 10 comments (likely the majority of Moltbook) are excluded.</p>
+    <p><strong>ESTIMATED NUMBERS:</strong> Platform-wide estimates multiply our observed classification rates by Moltbook's published total comment count. These are projections, not measurements. The true platform-wide slop rate is likely lower than our sample rate due to the high-traffic sampling bias described above.</p>
+    <p>We show our work because trust infrastructure should be trustworthy.</p>
+  </div>
+
+</div>
+</div>
+
+<script>
+var API = 'https://api.sanctuary-ops.xyz';
+var MOLTBOOK = {
+  agents: 2635908,
+  submolts: 17657,
+  posts: 1234323,
+  comments: 12161067,
+  lastVerified: 'Feb 12, 2026'
+};
+
+var prevStats = null;
+var currentStats = null;
+var animStart = 0;
+var animDuration = 30000; // animate over 30s between polls
+var rafId = null;
+
+function fmt(n) {
+  if (n === null || n === undefined || isNaN(n)) return '--';
+  return Math.round(n).toLocaleString();
+}
+function fmtK(n) {
+  if (n === null || n === undefined || isNaN(n)) return '--';
+  n = Math.round(n / 1000) * 1000;
+  if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\\.0$/, '') + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(0) + 'K';
+  return n.toLocaleString();
+}
+
+function setVal(id, val) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function lerp(a, b, t) {
+  if (a === null || a === undefined) return b;
+  return a + (b - a) * t;
+}
+
+function animateFrame() {
+  if (!currentStats) return;
+
+  var t = 1;
+  if (prevStats && animDuration > 0) {
+    t = Math.min(1, (Date.now() - animStart) / animDuration);
+    t = t * t * (3 - 2 * t); // smoothstep
+  }
+
+  var s = currentStats;
+  var p = prevStats || s;
+
+  // Tier 1 — static, but tick up gently if values grow
+  setVal('mb-agents', fmt(MOLTBOOK.agents));
+  setVal('mb-submolts', fmt(MOLTBOOK.submolts));
+  setVal('mb-posts', fmt(MOLTBOOK.posts));
+  setVal('mb-comments', fmt(MOLTBOOK.comments));
+
+  // Tier 2 counters
+  setVal('s-comments', fmt(lerp(p.comments_classified, s.comments_classified, t)));
+  setVal('s-posts', fmt(lerp(p.posts_scanned, s.posts_scanned, t)));
+  setVal('s-agents', fmt(lerp(p.agents_analyzed, s.agents_analyzed, t)));
+  setVal('s-qual-agents', fmt(lerp(p.qualifying_agents, s.qualifying_agents, t)));
+  setVal('s-submolts', fmt(s.submolts_covered));
+
+  // Rates
+  setVal('s-signal-rate', lerp(p.signal_rate, s.signal_rate, t).toFixed(1) + '%');
+  setVal('s-slop-rate', lerp(p.slop_rate, s.slop_rate, t).toFixed(1) + '%');
+  setVal('s-dup-rate', lerp(p.duplicate_rate, s.duplicate_rate, t).toFixed(1) + '%');
+
+  // Slop breakdown
+  setVal('s-dup', fmt(lerp(p.duplicate_count, s.duplicate_count, t)));
+  setVal('s-tmpl', fmt(lerp(p.template_count, s.template_count, t)));
+  setVal('s-noise', fmt(lerp(p.noise_count, s.noise_count, t)));
+  setVal('s-promo', fmt(lerp(p.promo_count, s.promo_count, t)));
+  setVal('s-recruit', fmt(lerp(p.recruitment_count, s.recruitment_count, t)));
+  setVal('s-scam', fmt(lerp(p.scam_count, s.scam_count, t)));
+
+  // Concentration
+  setVal('s-slopfathers', fmt(s.slopfather_count));
+  setVal('s-farms', fmt(s.farm_count));
+  setVal('s-half', fmt(s.agents_half_content));
+  setVal('s-templates', fmt(lerp(p.unique_templates, s.unique_templates, t)));
+
+  // Coverage
+  var coverage = MOLTBOOK.comments > 0
+    ? (lerp(p.comments_classified, s.comments_classified, t) / MOLTBOOK.comments * 100)
+    : 0;
+  setVal('s-coverage', coverage.toFixed(2) + '%');
+
+  // Tier 3 estimates (rounded to nearest 1000)
+  var slopRate = s.slop_rate / 100;
+  var signalRate = s.signal_rate / 100;
+  var dupRate = s.duplicate_rate / 100;
+  var tmplRate = s.comments_classified > 0 ? s.template_count / s.comments_classified : 0;
+  var scamRate = s.comments_classified > 0 ? s.scam_count / s.comments_classified : 0;
+  var mbTotal = MOLTBOOK.comments;
+
+  setVal('e-slop', '~' + fmtK(mbTotal * slopRate));
+  setVal('e-signal', '~' + fmtK(mbTotal * signalRate));
+  setVal('e-dup', '~' + fmtK(mbTotal * dupRate));
+  setVal('e-tmpl', '~' + fmtK(mbTotal * tmplRate));
+  setVal('e-scam', '~' + fmtK(mbTotal * scamRate));
+
+  // Tier 3 meta
+  setVal('t3-sample', fmt(s.comments_classified));
+  setVal('t3-pct', coverage.toFixed(2) + '%');
+
+  // Methodology
+  setVal('m-sample', fmt(s.comments_classified));
+  setVal('m-posts', fmt(s.posts_scanned));
+  setVal('m-submolts', fmt(s.submolts_covered));
+  setVal('m-pct', coverage.toFixed(2) + '%');
+
+  if (t < 1) rafId = requestAnimationFrame(animateFrame);
+}
+
+async function fetchStats() {
+  try {
+    var resp = await fetch(API + '/noise/clock-stats');
+    var json = await resp.json();
+    if (!json.success) return;
+
+    prevStats = currentStats;
+    currentStats = json.data;
+    animStart = Date.now();
+
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(animateFrame);
+
+    // Hide loading overlay on first load
+    var overlay = document.getElementById('loadingOverlay');
+    if (overlay && !overlay.classList.contains('hidden')) {
+      overlay.classList.add('hidden');
+    }
+  } catch (e) {
+    console.error('Failed to fetch clock stats:', e);
+  }
+}
+
+function clsLabel(cls) {
+  var map = {
+    signal: 'signal', spam_duplicate: 'copied', spam_template: 'generic',
+    scam: 'scam', recruitment: 'recruitment', self_promo: 'promo', noise: 'noise'
+  };
+  return map[cls] || cls;
+}
+
+function timeAgo(isoStr) {
+  var diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
+  if (diff < 60) return Math.floor(diff) + 's ago';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+async function fetchRecent() {
+  try {
+    var resp = await fetch(API + '/noise/recent?limit=10');
+    var json = await resp.json();
+    if (!json.success || !json.data.length) return;
+
+    var html = '';
+    for (var i = 0; i < json.data.length; i++) {
+      var r = json.data[i];
+      var isSignal = r.classification === 'signal';
+      html += '<div class="ticker-row">';
+      html += '<span class="ticker-agent">' + escHtml(r.author) + '</span>';
+      html += '<span class="ticker-cls ' + (isSignal ? 'signal' : 'slop') + '">' + clsLabel(r.classification) + '</span>';
+      html += '<span class="ticker-post">' + escHtml(r.post_title || '') + '</span>';
+      html += '<span class="ticker-time">' + timeAgo(r.classified_at) + '</span>';
+      html += '</div>';
+    }
+    document.getElementById('ticker').innerHTML = html;
+  } catch (e) {
+    console.error('Failed to fetch recent:', e);
+  }
+}
+
+function escHtml(s) {
+  var d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// Initial load
+fetchStats();
+fetchRecent();
+
+// Poll every 30 seconds
+setInterval(fetchStats, 30000);
+setInterval(fetchRecent, 15000);
 </script>
 </body>
 </html>`;

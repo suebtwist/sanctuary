@@ -120,6 +120,11 @@ async function main() {
     description: 'Identity persistence service for AI agents',
   }));
 
+  // Top-level redirects
+  fastify.get('/clock', async (_request, reply) => {
+    return reply.redirect('/noise/clock');
+  });
+
   // Register routes
   await fastify.register(authRoutes, { prefix: '/auth' });
   await fastify.register(agentRoutes, { prefix: '/agents' });

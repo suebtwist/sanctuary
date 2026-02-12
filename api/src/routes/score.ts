@@ -201,8 +201,9 @@ export function getSidebarCSS(): string {
   }`;
 }
 
-export function getSidebarHTML(activePage: 'home' | 'noise' | 'score'): string {
+export function getSidebarHTML(activePage: 'home' | 'noise' | 'score' | 'clock'): string {
   const links = [
+    { id: 'clock', icon: '&#x23F1;', label: 'Slop Clock', href: '/clock' },
     { id: 'home', icon: '&#x1F3E0;', label: 'Home', href: '/' },
     { id: 'noise', icon: '&#x1F4E1;', label: 'Slop Filter', href: '/noise' },
     { id: 'score', icon: '&#x1F3C6;', label: 'MoltScore', href: '/score' },
