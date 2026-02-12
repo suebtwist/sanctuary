@@ -55,6 +55,9 @@ export interface Config {
 
   // Export
   exportSecret: string;
+
+  // Backup
+  backupSecret: string;
 }
 
 function requireEnv(name: string): string {
@@ -132,6 +135,9 @@ export function loadConfig(): Config {
 
     // Export
     exportSecret: optionalEnv('EXPORT_SECRET', ''),
+
+    // Backup
+    backupSecret: optionalEnv('BACKUP_SECRET', ''),
   };
 }
 

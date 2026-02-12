@@ -1594,6 +1594,15 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_date ON classification_snapshots(snapsho
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
   }
+
+  // ============ Maintenance ============
+
+  /**
+   * Flush WAL to the main database file so a file copy is self-contained.
+   */
+  checkpoint(): void {
+    this.db.pragma('wal_checkpoint(TRUNCATE)');
+  }
 }
 
 // Singleton instance

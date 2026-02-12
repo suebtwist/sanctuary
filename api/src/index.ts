@@ -20,6 +20,7 @@ import { attestationRoutes } from './routes/attestations.js';
 import { statsRoutes } from './routes/stats.js';
 import { noiseRoutes } from './routes/noise.js';
 import { scoreRoutes } from './routes/score.js';
+import { adminRoutes } from './routes/admin.js';
 import { detectFallenAgents } from './services/trust-calculator.js';
 import { takeClassificationSnapshot, rescanOldPosts, discoverNewPosts } from './services/temporal-snapshots.js';
 
@@ -129,6 +130,7 @@ async function main() {
   await fastify.register(statsRoutes, { prefix: '/stats' });
   await fastify.register(noiseRoutes, { prefix: '/noise' });
   await fastify.register(scoreRoutes, { prefix: '/score' });
+  await fastify.register(adminRoutes, { prefix: '/admin' });
 
   // Graceful shutdown
   const shutdown = async () => {
