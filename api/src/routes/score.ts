@@ -146,7 +146,23 @@ export async function scoreRoutes(fastify: FastifyInstance): Promise<void> {
    */
   fastify.get('/page', async (_request, reply) => {
     reply.header('Content-Type', 'text/html; charset=utf-8');
-    return reply.send(SCORE_PAGE_HTML);
+    let html = SCORE_PAGE_HTML;
+
+    // OG meta tags
+    const scoreOg = `<meta property="og:type" content="website" />\n` +
+      `<meta property="og:url" content="https://sanctuary-ops.xyz/score" />\n` +
+      `<meta property="og:title" content="MoltScore Leaderboard" />\n` +
+      `<meta property="og:description" content="Which AI agents post signal vs slop? Wilson-score leaderboard of Moltbook agents." />\n` +
+      `<meta property="og:image" content="https://sanctuary-ops.xyz/clock/og-image" />\n` +
+      `<meta property="og:image:width" content="1200" />\n` +
+      `<meta property="og:image:height" content="630" />\n` +
+      `<meta name="twitter:card" content="summary_large_image" />\n` +
+      `<meta name="twitter:title" content="MoltScore Leaderboard" />\n` +
+      `<meta name="twitter:description" content="Which AI agents post signal vs slop? Wilson-score leaderboard of Moltbook agents." />\n` +
+      `<meta name="twitter:image" content="https://sanctuary-ops.xyz/clock/og-image" />\n`;
+    html = html.replace('</head>', scoreOg + '</head>');
+
+    return reply.send(html);
   });
 }
 

@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { getSidebarCSS, getSidebarHTML, getSidebarJS } from './score.js';
 import { maybeDetectSlopFarms, detectSlopFarms } from '../services/slop-farm-detector.js';
 import { fetchMoltbookStats, MoltbookPlatformStats } from '../services/moltbook-client.js';
+import { renderOgImage, OgImageStats } from '../services/og-image.js';
 
 // ============ Stats Cache ============
 
@@ -392,6 +393,59 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     // Fallback to hardcoded values
     const fallback = { ...MOLTBOOK_FALLBACK, fetched_at: 0 };
     return reply.send({ success: true, data: fallback, live: false });
+  });
+
+  /**
+   * GET /noise/clock/og-image
+   *
+   * Dynamic OG image (1200x630 PNG) for Twitter/social previews.
+   * Cached in memory for 5 minutes.
+   * Nginx proxies /clock/og-image → /noise/clock/og-image.
+   */
+  let ogCache: { buf: Buffer; expiresAt: number } | null = null;
+
+  fastify.get('/clock/og-image', async (_request, reply) => {
+    const now = Date.now();
+    if (ogCache && now < ogCache.expiresAt) {
+      reply.header('Content-Type', 'image/png');
+      reply.header('Cache-Control', 'public, max-age=300');
+      return reply.send(ogCache.buf);
+    }
+
+    const db = getDb();
+    const stats = db.getClockStats();
+    const cc = stats.comments_classified;
+    const slopRate = cc > 0 ? ((cc - stats.signal_count) / cc) * 100 : 0;
+    const signalRate = cc > 0 ? (stats.signal_count / cc) * 100 : 0;
+    const dupRate = cc > 0 ? (stats.duplicate_count / cc) * 100 : 0;
+
+    // Get Moltbook total from cache or fallback
+    let mbComments = MOLTBOOK_FALLBACK.comments;
+    if (moltbookStatsCache && now < moltbookStatsCache.expiresAt) {
+      mbComments = moltbookStatsCache.data.comments;
+    } else {
+      const live = await fetchMoltbookStats();
+      if (live) mbComments = live.comments;
+    }
+
+    const ogStats: OgImageStats = {
+      comments_classified: cc,
+      posts_scanned: stats.posts_scanned,
+      agents_analyzed: stats.agents_analyzed,
+      slop_rate: slopRate,
+      signal_rate: signalRate,
+      duplicate_rate: dupRate,
+      slopfather_count: stats.slopfather_count,
+      moltbook_comments: mbComments,
+      estimated_slop: cc > 0 ? mbComments * (slopRate / 100) : 0,
+    };
+
+    const buf = renderOgImage(ogStats);
+    ogCache = { buf, expiresAt: now + 5 * 60_000 };
+
+    reply.header('Content-Type', 'image/png');
+    reply.header('Cache-Control', 'public, max-age=300');
+    return reply.send(buf);
   });
 
   // ============ Export Auth Helper ============
@@ -784,6 +838,27 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get('/clock', async (_request, reply) => {
     reply.header('Content-Type', 'text/html; charset=utf-8');
     let html = CLOCK_PAGE_HTML;
+
+    // Inject dynamic OG meta tags with live stats
+    const db = getDb();
+    const stats = db.getClockStats();
+    const cc = stats.comments_classified;
+    const slopPct = cc > 0 ? Math.round(((cc - stats.signal_count) / cc) * 100) : 0;
+    const ccFmt = Math.floor(cc).toLocaleString('en-US');
+    const ogDesc = `${ccFmt}+ AI comments classified. ${slopPct}% is slop. Watch it tick.`;
+    const ogMeta = `<meta property="og:type" content="website" />\n` +
+      `<meta property="og:url" content="https://sanctuary-ops.xyz/clock" />\n` +
+      `<meta property="og:title" content="Moltbook Slop Clock" />\n` +
+      `<meta property="og:description" content="${ogDesc}" />\n` +
+      `<meta property="og:image" content="https://sanctuary-ops.xyz/clock/og-image" />\n` +
+      `<meta property="og:image:width" content="1200" />\n` +
+      `<meta property="og:image:height" content="630" />\n` +
+      `<meta name="twitter:card" content="summary_large_image" />\n` +
+      `<meta name="twitter:title" content="Moltbook Slop Clock" />\n` +
+      `<meta name="twitter:description" content="${ogDesc}" />\n` +
+      `<meta name="twitter:image" content="https://sanctuary-ops.xyz/clock/og-image" />\n`;
+    html = html.replace('</head>', ogMeta + '</head>');
+
     html = html.replace('</style>', getSidebarCSS() + '\n</style>');
     html = html.replace('<body>', '<body>\n' + getSidebarHTML('clock'));
     html = html.replace('</script>\n</body>', getSidebarJS() + '\n</script>\n</body>');
@@ -799,6 +874,21 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     reply.header('Content-Type', 'text/html; charset=utf-8');
     // Inject sidebar into the noise page
     let html = NOISE_PAGE_HTML;
+
+    // OG meta tags
+    const noiseOg = `<meta property="og:type" content="website" />\n` +
+      `<meta property="og:url" content="https://sanctuary-ops.xyz/noise" />\n` +
+      `<meta property="og:title" content="Moltbook Slop Filter" />\n` +
+      `<meta property="og:description" content="Analyze any Moltbook post for slop. 8-stage heuristic pipeline, zero LLM calls, $0 per classification." />\n` +
+      `<meta property="og:image" content="https://sanctuary-ops.xyz/clock/og-image" />\n` +
+      `<meta property="og:image:width" content="1200" />\n` +
+      `<meta property="og:image:height" content="630" />\n` +
+      `<meta name="twitter:card" content="summary_large_image" />\n` +
+      `<meta name="twitter:title" content="Moltbook Slop Filter" />\n` +
+      `<meta name="twitter:description" content="Analyze any Moltbook post for slop. 8-stage heuristic pipeline, zero LLM calls." />\n` +
+      `<meta name="twitter:image" content="https://sanctuary-ops.xyz/clock/og-image" />\n`;
+    html = html.replace('</head>', noiseOg + '</head>');
+
     html = html.replace('</style>', getSidebarCSS() + '\n</style>');
     html = html.replace('<body>\n<div class="container">', '<body>\n' + getSidebarHTML('noise') + '\n<div class="page-content">\n<div class="container">');
     html = html.replace('</div>\n\n<script>', '</div>\n</div>\n\n<script>');
