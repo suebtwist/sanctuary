@@ -1994,7 +1994,7 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
   .counter-value.orange { color: var(--orange); } .counter-value.white { color: var(--text); }
   .counter-value.yellow { color: var(--yellow); }
   .tier-3 .counter-box { background: rgba(18,20,29,0.6); border: 1px dashed rgba(249,115,22,0.3); }
-  .tier-3 .counter-value { opacity: 0.85; }
+  .tier-3 .counter-value { opacity: 1; }
   .tier-sub { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin: 18px 0 10px; }
   .coverage-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 14px; text-align: center; }
   .coverage-value { font-size: 36px; font-weight: 800; font-family: 'JetBrains Mono', monospace; color: var(--accent); }
@@ -2021,7 +2021,7 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
   .fraction { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
   .fraction .numer { font-size: 28px; font-weight: 700; font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; line-height: 1.1; }
   .fraction .sep { font-size: 18px; color: var(--text-muted); font-weight: 400; }
-  .fraction .denom { font-size: 16px; font-weight: 600; font-family: 'JetBrains Mono', monospace; color: var(--text); opacity: 0.7; font-variant-numeric: tabular-nums; }
+  .fraction .denom { font-size: 16px; font-weight: 600; font-family: 'JetBrains Mono', monospace; color: #ffffff; opacity: 0.6; font-variant-numeric: tabular-nums; }
   .fraction .pct { font-size: 13px; font-weight: 600; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); margin-left: 4px; }
   /* Digit brightness pulse */
   @keyframes digitPulse {
