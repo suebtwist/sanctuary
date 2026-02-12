@@ -1990,9 +1990,9 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
     font-size: 28px; font-weight: 700; font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
     letter-spacing: -0.02em; line-height: 1.1; font-variant-numeric: tabular-nums;
   }
-  .counter-value.green { color: var(--green); } .counter-value.red { color: var(--red); }
-  .counter-value.orange { color: var(--orange); } .counter-value.white { color: var(--text); }
-  .counter-value.yellow { color: var(--yellow); }
+  .counter-value.green, .green { color: var(--green); } .counter-value.red, .red { color: var(--red); }
+  .counter-value.orange, .orange { color: var(--orange); } .counter-value.white, .white { color: var(--text); }
+  .counter-value.yellow, .yellow { color: var(--yellow); }
   .tier-3 .counter-box { background: rgba(18,20,29,0.6); border: 1px dashed rgba(249,115,22,0.3); }
   .tier-3 .counter-value { opacity: 1; }
   .tier-sub { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin: 18px 0 10px; }
