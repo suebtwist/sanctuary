@@ -221,7 +221,7 @@ export async function fetchCommunityPosts(
   for (let page = 0; page < maxPages; page++) {
     const offset = page * 100;
     const response = await fetchWithTimeout(
-      `${MOLTBOOK_BASE}/posts?sort=top&limit=100&community=${encodeURIComponent(community)}&offset=${offset}`,
+      `${MOLTBOOK_BASE}/posts?sort=top&limit=100&submolt=${encodeURIComponent(community)}&offset=${offset}`,
       10_000,
     );
     if (!response || !response.ok) break;
@@ -301,8 +301,8 @@ export async function fetchMoltbookRecentPosts(minComments: number = 10): Promis
 
   // Fetch first page (top + new) per community
   for (const sub of communities) {
-    await fetchPage(`${MOLTBOOK_BASE}/posts?sort=top&limit=100&community=${encodeURIComponent(sub)}`);
-    await fetchPage(`${MOLTBOOK_BASE}/posts?sort=new&limit=100&community=${encodeURIComponent(sub)}`);
+    await fetchPage(`${MOLTBOOK_BASE}/posts?sort=top&limit=100&submolt=${encodeURIComponent(sub)}`);
+    await fetchPage(`${MOLTBOOK_BASE}/posts?sort=new&limit=100&submolt=${encodeURIComponent(sub)}`);
     await new Promise(r => setTimeout(r, 150));
   }
 
