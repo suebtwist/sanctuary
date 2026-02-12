@@ -1,14 +1,16 @@
 /**
- * Temporal Classification Snapshots & Rescan Scheduler
+ * Temporal Classification Snapshots, Rescan Scheduler & New Post Discovery
  *
  * 1. takeClassificationSnapshot() — daily job that records per-agent stats
  * 2. rescanOldPosts() — background loop that rescans stale posts (>7 days old)
+ * 3. discoverNewPosts() — polls Moltbook for new posts with 10+ comments
  *
- * Both respect a global scan mutex so rescans don't compete with new scans.
+ * All scan operations share a global mutex so they don't compete for API rate limits.
  */
 
 import { getDb } from '../db/index.js';
 import { analyzePost } from './noise-classifier.js';
+import { fetchMoltbookRecentPosts } from './moltbook-client.js';
 
 // ============ MoltScore (duplicated from score.ts to avoid circular imports) ============
 
@@ -55,10 +57,27 @@ export function takeClassificationSnapshot(): { agents: number; date: string } {
   return { agents: agentData.length, date: today };
 }
 
-// ============ Rescan Scheduler ============
+// ============ Shared Scan Mutex ============
+// Discovery and rescans share this mutex so only one runs at a time.
 
-let rescanRunning = false;
-let rescanStopRequested = false;
+let scannerBusy = false;
+let scanStopRequested = false;
+
+/**
+ * Check if any scan operation is currently running.
+ */
+export function isScannerBusy(): boolean {
+  return scannerBusy;
+}
+
+/**
+ * Request all scan loops to stop gracefully.
+ */
+export function stopScanner(): void {
+  scanStopRequested = true;
+}
+
+// ============ Rescan Scheduler ============
 
 /**
  * Rescan posts that were last scanned more than 7 days ago.
@@ -68,12 +87,12 @@ let rescanStopRequested = false;
 export async function rescanOldPosts(): Promise<{
   rescanned: number; failed: number; skipped: number;
 }> {
-  if (rescanRunning) {
+  if (scannerBusy) {
     return { rescanned: 0, failed: 0, skipped: 0 };
   }
 
-  rescanRunning = true;
-  rescanStopRequested = false;
+  scannerBusy = true;
+  scanStopRequested = false;
 
   const db = getDb();
   let rescanned = 0;
@@ -91,7 +110,7 @@ export async function rescanOldPosts(): Promise<{
     console.log(`[rescan] Found ${stalePostIds.length} stale posts to rescan`);
 
     for (const postId of stalePostIds) {
-      if (rescanStopRequested) {
+      if (scanStopRequested) {
         console.log(`[rescan] Stop requested, halting after ${rescanned} rescans`);
         break;
       }
@@ -123,22 +142,98 @@ export async function rescanOldPosts(): Promise<{
 
     console.log(`[rescan] Done. Rescanned: ${rescanned}, Failed: ${failed}, Skipped: ${skipped}`);
   } finally {
-    rescanRunning = false;
+    scannerBusy = false;
   }
 
   return { rescanned, failed, skipped };
 }
 
-/**
- * Stop the current rescan loop gracefully.
- */
-export function stopRescan(): void {
-  rescanStopRequested = true;
-}
+// ============ New Post Discovery ============
 
 /**
- * Check if a rescan is currently running.
+ * Discover and classify new Moltbook posts with 10+ comments.
+ * Polls the Moltbook API for recent posts across communities,
+ * filters out already-scanned posts, and runs the classification pipeline.
+ * Shares the scan mutex with rescanOldPosts to respect rate limits.
  */
+export async function discoverNewPosts(): Promise<{
+  found: number; scanned: number; failed: number;
+}> {
+  if (scannerBusy) {
+    console.log('[discover] Scanner busy, skipping this cycle');
+    return { found: 0, scanned: 0, failed: 0 };
+  }
+
+  scannerBusy = true;
+  scanStopRequested = false;
+
+  let found = 0;
+  let scanned = 0;
+  let failed = 0;
+  let backoffMs = 2500;
+
+  try {
+    // Step 1: Get already-scanned post IDs
+    const db = getDb();
+    const scannedIds = new Set(db.getScannedPostIds());
+
+    // Step 2: Fetch recent posts from Moltbook
+    const allPosts = await fetchMoltbookRecentPosts(10);
+
+    // Step 3: Filter to only new posts
+    const newPosts = allPosts.filter(p => !scannedIds.has(p.id));
+    found = newPosts.length;
+
+    if (found === 0) {
+      console.log(`[discover] No new posts found (${allPosts.length} total, all already scanned)`);
+      return { found: 0, scanned: 0, failed: 0 };
+    }
+
+    console.log(`[discover] Found ${found} new posts to scan (${allPosts.length} total from Moltbook)`);
+
+    // Step 4: Classify each new post
+    for (const post of newPosts) {
+      if (scanStopRequested) {
+        console.log(`[discover] Stop requested, halting after ${scanned} scans`);
+        break;
+      }
+
+      try {
+        const result = await analyzePost(post.id);
+        if (result) {
+          scanned++;
+          backoffMs = 2500; // reset on success
+          const sr = Math.round(result.signal_rate * 100);
+          console.log(`[discover] [${scanned}/${found}] ${post.id.slice(0, 8)} (${post.comment_count} comments) "${post.title.slice(0, 45)}" → ${result.total_comments} classified, ${sr}% signal`);
+        }
+      } catch (e: any) {
+        failed++;
+        if (e?.message?.includes('429') || e?.message?.includes('rate')) {
+          backoffMs = Math.min(backoffMs * 2, 60000);
+          console.warn(`[discover] Rate limited, backing off to ${backoffMs}ms`);
+        }
+        console.error(`[discover] Failed ${post.id.slice(0, 8)}:`, e?.message || e);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
+
+    console.log(`[discover] Done. Found: ${found}, Scanned: ${scanned}, Failed: ${failed}`);
+  } finally {
+    scannerBusy = false;
+  }
+
+  return { found, scanned, failed };
+}
+
+// ============ Backward-compatible exports ============
+
+/** @deprecated Use stopScanner() */
+export function stopRescan(): void {
+  stopScanner();
+}
+
+/** @deprecated Use isScannerBusy() */
 export function isRescanRunning(): boolean {
-  return rescanRunning;
+  return scannerBusy;
 }

@@ -21,7 +21,7 @@ import { statsRoutes } from './routes/stats.js';
 import { noiseRoutes } from './routes/noise.js';
 import { scoreRoutes } from './routes/score.js';
 import { detectFallenAgents } from './services/trust-calculator.js';
-import { takeClassificationSnapshot, rescanOldPosts } from './services/temporal-snapshots.js';
+import { takeClassificationSnapshot, rescanOldPosts, discoverNewPosts } from './services/temporal-snapshots.js';
 
 async function main() {
   // Load configuration
@@ -222,6 +222,23 @@ async function main() {
         fastify.log.error(err, 'Failed to take classification snapshot');
       }
     }, 24 * 60 * 60 * 1000);
+
+    // New post discovery: poll Moltbook every 30 minutes
+    // Delay first run by 60s to let startup settle
+    setTimeout(() => {
+      const runDiscovery = async () => {
+        try {
+          const result = await discoverNewPosts();
+          if (result.scanned > 0) {
+            fastify.log.info(result, 'New post discovery completed');
+          }
+        } catch (err) {
+          fastify.log.error(err, 'Failed to discover new posts');
+        }
+      };
+      runDiscovery();
+      setInterval(runDiscovery, 30 * 60 * 1000);
+    }, 60_000);
 
     // Background rescan: rescan stale posts every 2 hours
     // Delay first run by 6 hours to let initial scan finish

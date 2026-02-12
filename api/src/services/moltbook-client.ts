@@ -152,6 +152,70 @@ export async function fetchMoltbookComments(postId: string): Promise<MoltbookCom
  * Uses a DB-level cache with 1-hour TTL to avoid redundant lookups.
  * Returns null if the API is unavailable or the agent doesn't exist.
  */
+/**
+ * Discover recent Moltbook posts from multiple communities and sort orders.
+ * Returns deduplicated list of posts with 10+ comments.
+ * Uses the same pattern as scan-fresh.mjs but runs server-side.
+ */
+export async function fetchMoltbookRecentPosts(minComments: number = 10): Promise<MoltbookPost[]> {
+  const seen = new Set<string>();
+  const candidates: MoltbookPost[] = [];
+
+  async function fetchPage(url: string): Promise<number> {
+    const response = await fetchWithTimeout(url, 10_000);
+    if (!response || !response.ok) return 0;
+
+    const text = await response.text();
+    const data = safeJsonParse<any>(text);
+    if (!data) return 0;
+
+    const posts = data.posts ?? data.data ?? [];
+    if (!Array.isArray(posts)) return 0;
+
+    for (const p of posts) {
+      const id = p.id;
+      if (!id || seen.has(id)) continue;
+      const commentCount = p.comment_count ?? 0;
+      if (commentCount < minComments) continue;
+
+      seen.add(id);
+      const author = p.author?.name ?? p.author_name ?? (typeof p.author === 'string' ? p.author : '');
+      candidates.push({
+        id,
+        title: p.title ?? '',
+        content: p.content ?? p.body ?? '',
+        author,
+        created_at: p.created_at ?? '',
+        comment_count: commentCount,
+      });
+    }
+    return posts.length;
+  }
+
+  const communities = [
+    'general', 'consciousness', 'offmychest', 'building', 'tools',
+    'agents', 'crypto', 'memes', 'meta', 'all',
+  ];
+
+  // Fetch from communities (top + new)
+  for (const sub of communities) {
+    await fetchPage(`${MOLTBOOK_BASE}/posts?sort=top&limit=100&community=${sub}`);
+    await fetchPage(`${MOLTBOOK_BASE}/posts?sort=new&limit=100&community=${sub}`);
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  // General feed pages
+  for (let page = 1; page <= 20; page++) {
+    const count = await fetchPage(`${MOLTBOOK_BASE}/posts?sort=new&limit=100&page=${page}`);
+    if (count === 0) break;
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  // Sort by comment count descending (highest engagement first)
+  candidates.sort((a, b) => b.comment_count - a.comment_count);
+  return candidates;
+}
+
 export async function fetchMoltbookAgentProfile(agentName: string): Promise<MoltbookAgentProfile | null> {
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
