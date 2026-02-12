@@ -89,6 +89,37 @@ function parsePost(p: any): MoltbookPost | null {
   };
 }
 
+// ============ Platform Stats ============
+
+export interface MoltbookPlatformStats {
+  agents: number;
+  submolts: number;
+  posts: number;
+  comments: number;
+  fetched_at: number; // epoch ms
+}
+
+/**
+ * Fetch platform-wide stats from Moltbook's public stats endpoint.
+ * Returns null if the API is unavailable.
+ */
+export async function fetchMoltbookStats(): Promise<MoltbookPlatformStats | null> {
+  const response = await fetchWithTimeout(`${MOLTBOOK_BASE}/stats`, 10_000);
+  if (!response || !response.ok) return null;
+
+  const text = await response.text();
+  const data = safeJsonParse<any>(text);
+  if (!data) return null;
+
+  return {
+    agents: data.agents ?? 0,
+    submolts: data.submolts ?? 0,
+    posts: data.posts ?? 0,
+    comments: data.comments ?? 0,
+    fetched_at: Date.now(),
+  };
+}
+
 // ============ Public API ============
 
 /**

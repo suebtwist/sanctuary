@@ -12,6 +12,7 @@ import { getConfig } from '../config.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { getSidebarCSS, getSidebarHTML, getSidebarJS } from './score.js';
 import { maybeDetectSlopFarms, detectSlopFarms } from '../services/slop-farm-detector.js';
+import { fetchMoltbookStats, MoltbookPlatformStats } from '../services/moltbook-client.js';
 
 // ============ Stats Cache ============
 
@@ -363,6 +364,34 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     const rows = db.getRecentClassifications(50); // fetch 50, cache and slice
     recentCache = { data: rows, expiresAt: now + 10_000 };
     return reply.send({ success: true, data: rows.slice(0, limit) });
+  });
+
+  /**
+   * GET /noise/moltbook-stats
+   *
+   * Live platform stats from Moltbook's public API. Cached 5 minutes.
+   * Falls back to hardcoded values if the API is unavailable.
+   */
+  const MOLTBOOK_FALLBACK: MoltbookPlatformStats = {
+    agents: 2636279, submolts: 17659, posts: 1239044, comments: 12161421, fetched_at: 0,
+  };
+  let moltbookStatsCache: { data: MoltbookPlatformStats; expiresAt: number } | null = null;
+
+  fastify.get('/moltbook-stats', async (_request, reply) => {
+    const now = Date.now();
+    if (moltbookStatsCache && now < moltbookStatsCache.expiresAt) {
+      return reply.send({ success: true, data: moltbookStatsCache.data, live: true });
+    }
+
+    const stats = await fetchMoltbookStats();
+    if (stats) {
+      moltbookStatsCache = { data: stats, expiresAt: now + 5 * 60_000 };
+      return reply.send({ success: true, data: stats, live: true });
+    }
+
+    // Fallback to hardcoded values
+    const fallback = { ...MOLTBOOK_FALLBACK, fetched_at: 0 };
+    return reply.send({ success: true, data: fallback, live: false });
   });
 
   // ============ Export Auth Helper ============
@@ -1918,6 +1947,7 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Slop Clock — Moltbook Slop Filter</title>
 <style>
+  html { scroll-behavior: smooth; }
   :root {
     --bg: #0a0c12; --surface: #12141d; --border: #2a2d3a;
     --text: #e2e4e9; --text-muted: #8b8fa3; --accent: #6366f1;
@@ -1953,7 +1983,7 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
   .tier-2 .tier-label { color: var(--green); } .tier-2 .tier-label .dot { background: var(--green); }
   .tier-3 .tier-label { color: var(--orange); } .tier-3 .tier-label .dot { background: var(--orange); }
   .counter-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
-  .counter-grid.wide { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .counter-grid.wide { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
   .counter-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
   .counter-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 6px; }
   .counter-value {
@@ -1973,6 +2003,8 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
   .methodology h3 { font-size: 14px; font-weight: 700; color: var(--text); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 16px; }
   .methodology p { margin-bottom: 12px; }
   .methodology strong { color: var(--text); font-weight: 600; }
+  .methodology a { color: var(--accent); text-decoration: none; }
+  .methodology a:hover { text-decoration: underline; }
   .ticker-section { margin-top: 28px; }
   .ticker-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 10px; }
   .ticker { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-family: 'JetBrains Mono', monospace; font-size: 12px; max-height: 240px; overflow: hidden; }
@@ -1985,10 +2017,24 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
   .loading-overlay { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 9999; transition: opacity 0.3s; }
   .loading-overlay.hidden { opacity: 0; pointer-events: none; }
   .loading-text { font-size: 18px; color: var(--text-muted); }
+  /* Fraction display for estimated numbers */
+  .fraction { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .fraction .numer { font-size: 28px; font-weight: 700; font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; line-height: 1.1; }
+  .fraction .sep { font-size: 18px; color: var(--text-muted); font-weight: 400; }
+  .fraction .denom { font-size: 16px; font-weight: 600; font-family: 'JetBrains Mono', monospace; color: var(--text); opacity: 0.7; font-variant-numeric: tabular-nums; }
+  .fraction .pct { font-size: 13px; font-weight: 600; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); margin-left: 4px; }
+  /* Digit brightness pulse */
+  @keyframes digitPulse {
+    0% { filter: brightness(1); }
+    15% { filter: brightness(1.7); }
+    100% { filter: brightness(1); }
+  }
+  .digit-pulse { animation: digitPulse 0.6s ease-out; }
   @media (max-width: 768px) {
     .page-content { margin-left: 0; } .clock-container { padding: 16px 12px 60px; }
     .clock-header h1 { font-size: 24px; } .counter-grid { grid-template-columns: repeat(2, 1fr); }
     .counter-value { font-size: 20px; } .coverage-value { font-size: 28px; }
+    .fraction .numer { font-size: 20px; } .fraction .denom { font-size: 13px; }
   }
 </style>
 </head>
@@ -2006,13 +2052,13 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
   <div class="tier tier-3">
     <div class="tier-label"><span class="dot"></span> ESTIMATED PLATFORM-WIDE
       <span class="tier-source">Estimated by applying Sanctuary's classified rates to Moltbook's total comment count.</span></div>
-    <div style="font-size:12px;color:var(--orange);margin:-8px 0 14px;line-height:1.5;">Based on a sample of <span id="t3-sample">--</span> comments (<span id="t3-pct">--</span> of platform). Actual numbers may differ &mdash; see methodology.</div>
+    <div style="font-size:12px;color:var(--orange);margin:-8px 0 14px;line-height:1.5;">Based on a sample of <span id="t3-sample">--</span> comments (<span id="t3-pct">--</span> of platform). Actual numbers may differ &mdash; <a href="#methodology" style="color:var(--accent);">see methodology</a>.</div>
     <div class="counter-grid wide">
-      <div class="counter-box"><div class="counter-label">Est. Slop Comments</div><div class="counter-value red" id="e-slop">--</div></div>
-      <div class="counter-box"><div class="counter-label">Est. Signal Comments</div><div class="counter-value green" id="e-signal">--</div></div>
-      <div class="counter-box"><div class="counter-label">Est. Copy-Pastes</div><div class="counter-value red" id="e-dup">--</div></div>
-      <div class="counter-box"><div class="counter-label">Est. Generic Spam</div><div class="counter-value orange" id="e-tmpl">--</div></div>
-      <div class="counter-box"><div class="counter-label">Est. Scam Comments</div><div class="counter-value red" id="e-scam">--</div></div>
+      <div class="counter-box"><div class="counter-label">Est. Slop Comments</div><div class="fraction"><span class="numer red" id="e-slop">--</span><span class="sep">/</span><span class="denom" id="e-slop-d">--</span><span class="pct" id="e-slop-p">--</span></div></div>
+      <div class="counter-box"><div class="counter-label">Est. Signal Comments</div><div class="fraction"><span class="numer green" id="e-signal">--</span><span class="sep">/</span><span class="denom" id="e-signal-d">--</span><span class="pct" id="e-signal-p">--</span></div></div>
+      <div class="counter-box"><div class="counter-label">Est. Copy-Pastes</div><div class="fraction"><span class="numer red" id="e-dup">--</span><span class="sep">/</span><span class="denom" id="e-dup-d">--</span><span class="pct" id="e-dup-p">--</span></div></div>
+      <div class="counter-box"><div class="counter-label">Est. Generic Spam</div><div class="fraction"><span class="numer orange" id="e-tmpl">--</span><span class="sep">/</span><span class="denom" id="e-tmpl-d">--</span><span class="pct" id="e-tmpl-p">--</span></div></div>
+      <div class="counter-box"><div class="counter-label">Est. Scam Comments</div><div class="fraction"><span class="numer red" id="e-scam">--</span><span class="sep">/</span><span class="denom" id="e-scam-d">--</span><span class="pct" id="e-scam-p">--</span></div></div>
     </div>
   </div>
 
@@ -2059,7 +2105,7 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
   <!-- TIER 1: Moltbook (context) -->
   <div class="tier tier-1">
     <div class="tier-label"><span class="dot"></span> MOLTBOOK PLATFORM
-      <span class="tier-source">Source: Moltbook public stats &middot; Last verified: Feb 12, 2026</span></div>
+      <span class="tier-source" id="mb-source">Source: Moltbook public API &middot; Loading...</span></div>
     <div class="counter-grid">
       <div class="counter-box"><div class="counter-label">Total AI Agents</div><div class="counter-value white" id="mb-agents">--</div></div>
       <div class="counter-box"><div class="counter-label">Total Submolts</div><div class="counter-value white" id="mb-submolts">--</div></div>
@@ -2075,7 +2121,7 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
   </div>
 
   <!-- Methodology -->
-  <div class="methodology">
+  <div class="methodology" id="methodology">
     <h3>How We Calculate</h3>
     <p>Sanctuary classifies Moltbook comments using an <strong>8-stage heuristic pipeline</strong> with zero LLM calls and zero cost per classification. Each comment is categorized as <strong>signal</strong> or one of 6 slop subcategories (copied, generic, low-effort, promo, recruitment, scam).</p>
     <p><strong>SAMPLE SIZE:</strong> <span id="m-sample">--</span> comments across <span id="m-posts">--</span> posts in <span id="m-submolts">--</span> submolts, representing <span id="m-pct">--</span> of all Moltbook comments.</p>
@@ -2089,14 +2135,18 @@ const CLOCK_PAGE_HTML = `<!DOCTYPE html>
 
 <script>
 var API = 'https://api.sanctuary-ops.xyz';
-var MOLTBOOK = { agents: 2635908, submolts: 17657, posts: 1234323, comments: 12161067 };
+var MOLTBOOK = { agents: 0, submolts: 0, posts: 0, comments: 0 };
+var mbLive = false;
 var POLL_MS = 30000;
+var MB_POLL_MS = 300000; // 5 minutes
 
 // Ticking counter state: each counter tracks current float, target int, and rate per ms
 var counters = {};
 var lastPollTime = 0;
+var lastMbPollTime = 0;
 var currentStats = null;
 var firstLoad = true;
+var prevDisplayValues = {}; // track previous displayed text for pulse detection
 
 function fmt(n) {
   if (n === null || n === undefined || isNaN(n)) return '--';
@@ -2105,7 +2155,16 @@ function fmt(n) {
 
 function setVal(id, val) {
   var el = document.getElementById(id);
-  if (el) el.textContent = val;
+  if (!el) return;
+  var prev = prevDisplayValues[id];
+  el.textContent = val;
+  // Pulse on change
+  if (prev !== undefined && prev !== val && val !== '--') {
+    el.classList.remove('digit-pulse');
+    void el.offsetWidth; // force reflow to restart animation
+    el.classList.add('digit-pulse');
+  }
+  prevDisplayValues[id] = val;
 }
 
 function setCounter(id, newTarget) {
@@ -2119,15 +2178,29 @@ function setCounter(id, newTarget) {
   c.current = c.target;
   c.target = newTarget;
   var delta = newTarget - c.current;
-  // Only tick if there's actual change
   c.rate = (delta !== 0) ? delta / POLL_MS : 0;
+}
+
+function setMbCounter(id, newTarget) {
+  if (newTarget === null || newTarget === undefined) return;
+  var c = counters[id];
+  if (!c) {
+    counters[id] = { current: newTarget, target: newTarget, rate: 0, mbPoll: true };
+    return;
+  }
+  c.current = c.target;
+  c.target = newTarget;
+  var delta = newTarget - c.current;
+  c.rate = (delta !== 0) ? delta / MB_POLL_MS : 0;
+  c.mbPoll = true;
 }
 
 function getCounter(id, elapsed) {
   var c = counters[id];
   if (!c) return null;
   if (c.rate === 0) return c.target;
-  var val = c.current + c.rate * elapsed;
+  var e = c.mbPoll ? (Date.now() - lastMbPollTime) : elapsed;
+  var val = c.current + c.rate * e;
   if (c.rate > 0) return Math.min(val, c.target);
   if (c.rate < 0) return Math.max(val, c.target);
   return val;
@@ -2138,11 +2211,15 @@ function tickFrame() {
   var elapsed = Date.now() - lastPollTime;
   var s = currentStats;
 
-  // Moltbook platform (static)
-  setVal('mb-agents', fmt(MOLTBOOK.agents));
-  setVal('mb-submolts', fmt(MOLTBOOK.submolts));
-  setVal('mb-posts', fmt(MOLTBOOK.posts));
-  setVal('mb-comments', fmt(MOLTBOOK.comments));
+  // Moltbook platform (ticking if live)
+  var mbAgents = getCounter('mb_agents', elapsed) || MOLTBOOK.agents;
+  var mbSubmolts = getCounter('mb_submolts', elapsed) || MOLTBOOK.submolts;
+  var mbPosts = getCounter('mb_posts', elapsed) || MOLTBOOK.posts;
+  var mbComments = getCounter('mb_comments', elapsed) || MOLTBOOK.comments;
+  setVal('mb-agents', fmt(mbAgents));
+  setVal('mb-submolts', fmt(mbSubmolts));
+  setVal('mb-posts', fmt(mbPosts));
+  setVal('mb-comments', fmt(mbComments));
 
   // Sanctuary ticking counters
   var cc = getCounter('comments_classified', elapsed) || 0;
@@ -2181,16 +2258,32 @@ function tickFrame() {
   setVal('s-templates', fmt(getCounter('unique_templates', elapsed)));
 
   // Coverage
-  var coverage = MOLTBOOK.comments > 0 ? (cc / MOLTBOOK.comments * 100) : 0;
+  var coverage = mbComments > 0 ? (cc / mbComments * 100) : 0;
   setVal('s-coverage', coverage.toFixed(2) + '%');
 
-  // Estimated — derived from ticking rates, full integers
-  var mbT = MOLTBOOK.comments;
-  setVal('e-slop', fmt(cc > 0 ? mbT * slopC / cc : 0));
-  setVal('e-signal', fmt(cc > 0 ? mbT * sigC / cc : 0));
-  setVal('e-dup', fmt(cc > 0 ? mbT * dupC / cc : 0));
-  setVal('e-tmpl', fmt(cc > 0 ? mbT * tmplC / cc : 0));
-  setVal('e-scam', fmt(cc > 0 ? mbT * scamC / cc : 0));
+  // Estimated — fraction display: numerator / denominator  percentage
+  var mbT = mbComments;
+  var estSlop = cc > 0 ? mbT * slopC / cc : 0;
+  var estSig = cc > 0 ? mbT * sigC / cc : 0;
+  var estDup = cc > 0 ? mbT * dupC / cc : 0;
+  var estTmpl = cc > 0 ? mbT * tmplC / cc : 0;
+  var estScam = cc > 0 ? mbT * scamC / cc : 0;
+
+  setVal('e-slop', fmt(estSlop));
+  setVal('e-slop-d', fmt(mbT));
+  setVal('e-slop-p', cc > 0 ? (slopC / cc * 100).toFixed(1) + '%' : '--');
+  setVal('e-signal', fmt(estSig));
+  setVal('e-signal-d', fmt(mbT));
+  setVal('e-signal-p', cc > 0 ? (sigC / cc * 100).toFixed(1) + '%' : '--');
+  setVal('e-dup', fmt(estDup));
+  setVal('e-dup-d', fmt(mbT));
+  setVal('e-dup-p', cc > 0 ? (dupC / cc * 100).toFixed(1) + '%' : '--');
+  setVal('e-tmpl', fmt(estTmpl));
+  setVal('e-tmpl-d', fmt(mbT));
+  setVal('e-tmpl-p', cc > 0 ? (tmplC / cc * 100).toFixed(1) + '%' : '--');
+  setVal('e-scam', fmt(estScam));
+  setVal('e-scam-d', fmt(mbT));
+  setVal('e-scam-p', cc > 0 ? (scamC / cc * 100).toFixed(1) + '%' : '--');
 
   setVal('t3-sample', fmt(cc));
   setVal('t3-pct', coverage.toFixed(2) + '%');
@@ -2231,6 +2324,30 @@ async function fetchStats() {
   } catch (e) { console.error('Failed to fetch clock stats:', e); }
 }
 
+async function fetchMoltbookStats() {
+  try {
+    var resp = await fetch(API + '/noise/moltbook-stats');
+    var json = await resp.json();
+    if (!json.success) return;
+    var d = json.data;
+    MOLTBOOK = { agents: d.agents, submolts: d.submolts, posts: d.posts, comments: d.comments };
+    lastMbPollTime = Date.now();
+    setMbCounter('mb_agents', d.agents);
+    setMbCounter('mb_submolts', d.submolts);
+    setMbCounter('mb_posts', d.posts);
+    setMbCounter('mb_comments', d.comments);
+    mbLive = json.live;
+    var srcEl = document.getElementById('mb-source');
+    if (srcEl) {
+      if (json.live && d.fetched_at > 0) {
+        srcEl.textContent = 'Source: Moltbook public API \\u00b7 Live';
+      } else {
+        srcEl.textContent = 'Source: Moltbook public stats \\u00b7 Static fallback';
+      }
+    }
+  } catch (e) { console.error('Failed to fetch Moltbook stats:', e); }
+}
+
 function clsLabel(cls) {
   return { signal:'signal', spam_duplicate:'copied', spam_template:'generic', scam:'scam', recruitment:'recruitment', self_promo:'promo', noise:'noise' }[cls] || cls;
 }
@@ -2266,11 +2383,13 @@ async function fetchRecent() {
 
 function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
+fetchMoltbookStats();
 fetchStats();
 fetchRecent();
 requestAnimationFrame(tickFrame);
 setInterval(fetchStats, POLL_MS);
 setInterval(fetchRecent, 15000);
+setInterval(fetchMoltbookStats, MB_POLL_MS);
 </script>
 </body>
 </html>`;
