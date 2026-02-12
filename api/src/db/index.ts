@@ -1313,6 +1313,20 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_date ON classification_snapshots(snapsho
   }
 
   /**
+   * Get classification counts grouped by date for timeline chart.
+   */
+  getTimelineClassifications(): Array<{ date: string; classification: string; count: number }> {
+    const sql = `
+      SELECT DATE(classified_at) as date, classification, COUNT(*) as count
+      FROM classified_comments
+      WHERE classifier_version = (SELECT MAX(classifier_version) FROM classified_comments)
+      GROUP BY date, classification
+      ORDER BY date, classification
+    `;
+    return this.db.prepare(sql).all() as Array<{ date: string; classification: string; count: number }>;
+  }
+
+  /**
    * Get spam concentration stats: heavy spammers (100+ comments, 0 signal).
    */
   getSpamConcentration(): {

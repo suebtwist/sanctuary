@@ -278,6 +278,38 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     });
   });
 
+  /**
+   * GET /noise/timeline
+   *
+   * Classification counts per day for the stacked area chart.
+   */
+  fastify.get('/timeline', async (_request, reply) => {
+    reply.header('Cache-Control', 'no-cache');
+
+    const db = getDb();
+    const raw = db.getTimelineClassifications();
+
+    // Group by date
+    const dateMap = new Map<string, { counts: Record<string, number>; total: number }>();
+    for (const row of raw) {
+      let entry = dateMap.get(row.date);
+      if (!entry) {
+        entry = { counts: {}, total: 0 };
+        dateMap.set(row.date, entry);
+      }
+      entry.counts[row.classification] = row.count;
+      entry.total += row.count;
+    }
+
+    const timeline = Array.from(dateMap.entries()).map(([date, entry]) => ({
+      date,
+      counts: entry.counts,
+      total: entry.total,
+    }));
+
+    return reply.send({ success: true, data: { timeline } });
+  });
+
   // ============ Export Auth Helper ============
 
   function checkExportSecret(secret?: string): boolean {
@@ -684,7 +716,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sanctuary Slop Filter</title>
+<title>Moltbook Slop Filter</title>
 <style>
   :root {
     --bg: #0f1117;
@@ -896,21 +928,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   }
   .chart-card h3 { font-size: 16px; margin-bottom: 4px; }
   .chart-subtitle { font-size: 12px; color: var(--text-muted); margin-bottom: 20px; }
-  .stacked-bar-container {
-    display: flex; align-items: flex-end; gap: 8px; height: 220px;
-    padding-bottom: 28px; position: relative;
-  }
-  .bar-column { flex: 1; display: flex; flex-direction: column; align-items: center; position: relative; height: 100%; }
-  .bar-stack {
-    width: 100%; max-width: 80px; display: flex; flex-direction: column-reverse;
-    border-radius: 4px 4px 0 0; overflow: hidden; position: absolute; bottom: 28px;
-  }
-  .bar-seg { min-height: 1px; transition: height 0.5s ease; }
-  .bar-label { position: absolute; bottom: 8px; font-size: 11px; color: var(--text-muted); text-align: center; width: 100%; }
-  .bar-total { position: absolute; bottom: 0; font-size: 10px; color: var(--text-muted); text-align: center; width: 100%; opacity: 0.6; }
-  .chart-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; }
-  .chart-legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-muted); }
-  .chart-legend-dot { width: 10px; height: 10px; border-radius: 2px; }
+  #timelineCanvas { width: 100% !important; height: 100% !important; }
   .concentration-card {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 12px; padding: 28px; margin-bottom: 20px;
@@ -997,12 +1015,13 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
     .leaderboard-title { font-size: 13px; }
   }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
 </head>
 <body>
 <div class="container">
   <div class="header">
     <span class="shield">&#x1F6E1;</span>
-    <h1>Sanctuary Slop Filter</h1>
+    <h1>Moltbook Slop Filter</h1>
     <p>See what's real on Moltbook.</p>
   </div>
 
@@ -1066,11 +1085,10 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="charts-section" id="chartsSection">
-    <div class="chart-card" id="ageChartCard" style="display:none;">
-      <h3>&#x1F4CA; Comment Composition by Post Age</h3>
-      <div class="chart-subtitle" id="ageChartSubtitle"></div>
-      <div class="stacked-bar-container" id="ageChartBars"></div>
-      <div class="chart-legend" id="ageChartLegend"></div>
+    <div class="chart-card" id="timelineChartCard" style="display:none;">
+      <h3>&#x1F4CA; Classification Timeline</h3>
+      <div class="chart-subtitle" id="timelineSubtitle"></div>
+      <div style="position:relative;height:280px;"><canvas id="timelineCanvas"></canvas></div>
     </div>
     <div class="concentration-card" id="concentrationCard" style="display:none;">
       <div class="concentration-header">Slop Concentration</div>
@@ -1496,7 +1514,6 @@ async function loadCharts() {
     var resp = await fetch(API_BASE + '/noise/charts');
     var json = await resp.json();
     if (!json.success) return;
-    renderStackedBars(json.data.age_buckets);
     renderConcentration(json.data.spam_concentration);
     renderSlopFarms(json.data.slop_farms);
     renderSignalDistribution(json.data.signal_distribution);
@@ -1505,77 +1522,101 @@ async function loadCharts() {
   } catch (e) {
     console.error('loadCharts failed:', e);
   }
+  try {
+    var resp2 = await fetch(API_BASE + '/noise/timeline');
+    var json2 = await resp2.json();
+    if (json2.success) renderTimeline(json2.data.timeline);
+  } catch (e) {
+    console.error('loadTimeline failed:', e);
+  }
 }
 
-function renderStackedBars(buckets) {
-  var card = document.getElementById('ageChartCard');
-  var barsEl = document.getElementById('ageChartBars');
-  var legendEl = document.getElementById('ageChartLegend');
-  var subtitleEl = document.getElementById('ageChartSubtitle');
-  if (!buckets || buckets.length === 0) return;
+var timelineChart = null;
+function renderTimeline(timeline) {
+  var card = document.getElementById('timelineChartCard');
+  var subtitleEl = document.getElementById('timelineSubtitle');
+  var canvas = document.getElementById('timelineCanvas');
+  if (!timeline || timeline.length === 0) return;
 
-  var maxTotal = 0;
   var grandTotal = 0;
-  for (var i = 0; i < buckets.length; i++) {
-    if (buckets[i].total > maxTotal) maxTotal = buckets[i].total;
-    grandTotal += buckets[i].total;
-  }
-  if (maxTotal === 0) return;
+  for (var i = 0; i < timeline.length; i++) grandTotal += timeline[i].total;
+  subtitleEl.textContent = grandTotal.toLocaleString() + ' comments across ' + timeline.length + ' days';
 
-  subtitleEl.textContent = grandTotal.toLocaleString() + ' comments across ' + buckets.length + ' age ranges';
-  barsEl.innerHTML = '';
+  var labels = timeline.map(function(d) { return d.date; });
 
-  for (var i = 0; i < buckets.length; i++) {
-    var bucket = buckets[i];
-    var col = document.createElement('div');
-    col.className = 'bar-column';
+  var COLORS = {
+    signal: '#22c55e',
+    spam_template: '#f97316',
+    spam_duplicate: '#ef4444',
+    scam: '#dc2626',
+    recruitment: '#a855f7',
+    self_promo: '#eab308',
+    noise: '#6b7280'
+  };
 
-    var stack = document.createElement('div');
-    stack.className = 'bar-stack';
-    stack.style.height = (bucket.total / maxTotal * 100) + '%';
+  var datasets = CHART_CLS_ORDER.map(function(cls) {
+    return {
+      label: CHART_CLS[cls].label,
+      data: timeline.map(function(d) { return d.counts[cls] || 0; }),
+      backgroundColor: COLORS[cls] + '99',
+      borderColor: COLORS[cls],
+      borderWidth: 1.5,
+      fill: true,
+      tension: 0.4,
+      pointRadius: timeline.length <= 14 ? 3 : 0,
+      pointHoverRadius: 5
+    };
+  });
 
-    for (var j = 0; j < CHART_CLS_ORDER.length; j++) {
-      var cls = CHART_CLS_ORDER[j];
-      var count = bucket.counts[cls] || 0;
-      if (count === 0) continue;
-      var seg = document.createElement('div');
-      seg.className = 'bar-seg';
-      seg.style.height = (count / bucket.total * 100) + '%';
-      seg.style.background = CHART_CLS[cls].color;
-      seg.title = CHART_CLS[cls].label + ': ' + count.toLocaleString();
-      stack.appendChild(seg);
+  if (timelineChart) timelineChart.destroy();
+
+  timelineChart = new Chart(canvas, {
+    type: 'line',
+    data: { labels: labels, datasets: datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: {
+          stacked: true,
+          ticks: { color: '#8b8fa3', font: { size: 11 }, maxRotation: 0 },
+          grid: { display: false },
+          border: { color: '#2a2d3a' }
+        },
+        y: {
+          stacked: true,
+          ticks: {
+            color: '#8b8fa3', font: { size: 11 },
+            callback: function(v) { return v >= 1000 ? (v/1000).toFixed(0) + 'k' : v; }
+          },
+          grid: { color: 'rgba(255,255,255,0.04)' },
+          border: { display: false }
+        }
+      },
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { color: '#8b8fa3', padding: 16, usePointStyle: true, pointStyleWidth: 10, font: { size: 11 } }
+        },
+        tooltip: {
+          backgroundColor: '#1a1d27',
+          titleColor: '#e2e4e9',
+          bodyColor: '#8b8fa3',
+          borderColor: '#2a2d3a',
+          borderWidth: 1,
+          padding: 12,
+          callbacks: {
+            footer: function(items) {
+              var sum = 0;
+              for (var i = 0; i < items.length; i++) sum += items[i].raw;
+              return 'Total: ' + sum.toLocaleString();
+            }
+          }
+        }
+      }
     }
-
-    var label = document.createElement('div');
-    label.className = 'bar-label';
-    label.textContent = bucket.label;
-
-    var total = document.createElement('div');
-    total.className = 'bar-total';
-    total.textContent = bucket.total.toLocaleString();
-
-    col.appendChild(stack);
-    col.appendChild(label);
-    col.appendChild(total);
-    barsEl.appendChild(col);
-  }
-
-  // Legend
-  legendEl.innerHTML = '';
-  var seenCls = {};
-  for (var i = 0; i < buckets.length; i++) {
-    for (var cls in buckets[i].counts) {
-      if (buckets[i].counts[cls] > 0) seenCls[cls] = true;
-    }
-  }
-  for (var j = 0; j < CHART_CLS_ORDER.length; j++) {
-    var cls = CHART_CLS_ORDER[j];
-    if (!seenCls[cls]) continue;
-    var item = document.createElement('div');
-    item.className = 'chart-legend-item';
-    item.innerHTML = '<span class="chart-legend-dot" style="background:' + CHART_CLS[cls].color + '"></span>' + CHART_CLS[cls].label;
-    legendEl.appendChild(item);
-  }
+  });
 
   card.style.display = 'block';
 }
@@ -1821,7 +1862,7 @@ function buildHitsPage(data: HitsData): string {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sanctuary — Site Analytics</title>
+<title>Moltbook — Site Analytics</title>
 <style>
   :root { --bg: #0a0b0f; --surface: #13151c; --border: #1f2231; --text: #e2e4e9; --muted: #8b8fa3; --accent: #6366f1; --green: #22c55e; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
