@@ -1016,6 +1016,8 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
   }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
 </head>
 <body>
 <div class="container">
@@ -1089,6 +1091,7 @@ const NOISE_PAGE_HTML = `<!DOCTYPE html>
       <h3>&#x1F4CA; Classification Timeline</h3>
       <div class="chart-subtitle" id="timelineSubtitle"></div>
       <div style="position:relative;height:280px;"><canvas id="timelineCanvas"></canvas></div>
+      <div style="text-align:center;font-size:11px;color:#555;margin-top:4px;">Scroll to zoom &middot; Drag to pan &middot; Double-click to reset</div>
     </div>
     <div class="concentration-card" id="concentrationCard" style="display:none;">
       <div class="concentration-header">Slop Concentration</div>
@@ -1613,10 +1616,28 @@ function renderTimeline(timeline) {
               return 'Total: ' + sum.toLocaleString();
             }
           }
+        },
+        zoom: {
+          zoom: {
+            wheel: { enabled: true },
+            pinch: { enabled: true },
+            mode: 'x'
+          },
+          pan: {
+            enabled: true,
+            mode: 'x'
+          },
+          limits: {
+            x: { minRange: 3 }
+          }
         }
       }
     }
   });
+
+  canvas.ondblclick = function() {
+    if (timelineChart) timelineChart.resetZoom();
+  };
 
   card.style.display = 'block';
 }

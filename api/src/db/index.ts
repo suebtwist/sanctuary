@@ -1313,15 +1313,18 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_date ON classification_snapshots(snapsho
   }
 
   /**
-   * Get classification counts grouped by date for timeline chart.
+   * Get classification counts grouped by post creation date for timeline chart.
+   * Uses scan_stats.post_created_at (when the post was published on Moltbook)
+   * rather than classified_at (when our scanner processed it).
    */
   getTimelineClassifications(): Array<{ date: string; classification: string; count: number }> {
     const sql = `
-      SELECT DATE(classified_at) as date, classification, COUNT(*) as count
-      FROM classified_comments
-      WHERE classifier_version = (SELECT MAX(classifier_version) FROM classified_comments)
-      GROUP BY date, classification
-      ORDER BY date, classification
+      SELECT DATE(s.post_created_at) as date, c.classification, COUNT(*) as count
+      FROM classified_comments c
+      JOIN scan_stats s ON c.post_id = s.post_id
+      WHERE c.classifier_version = (SELECT MAX(classifier_version) FROM classified_comments)
+      GROUP BY date, c.classification
+      ORDER BY date, c.classification
     `;
     return this.db.prepare(sql).all() as Array<{ date: string; classification: string; count: number }>;
   }
