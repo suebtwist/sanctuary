@@ -364,6 +364,15 @@ CREATE TABLE IF NOT EXISTS classification_snapshots (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshot_agent_date ON classification_snapshots(agent_name, snapshot_date);
 CREATE INDEX IF NOT EXISTS idx_snapshot_date ON classification_snapshots(snapshot_date);
+
+CREATE TABLE IF NOT EXISTS moltbook_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agents INTEGER NOT NULL,
+    submolts INTEGER NOT NULL,
+    posts INTEGER NOT NULL,
+    comments INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
     `);
 
     // Migrations: add columns that may not exist on older schemas
@@ -1760,6 +1769,32 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_date ON classification_snapshots(snapsho
       post_title: string;
       classified_at: string;
     }>;
+  }
+
+  // ============ Moltbook Platform Stats ============
+
+  /**
+   * Store a Moltbook stats snapshot. Only stores if values are non-zero.
+   */
+  insertMoltbookStats(stats: { agents: number; submolts: number; posts: number; comments: number }): void {
+    if (stats.agents <= 0 && stats.submolts <= 0 && stats.posts <= 0 && stats.comments <= 0) return;
+    this.db.prepare(`
+      INSERT INTO moltbook_stats (agents, submolts, posts, comments)
+      VALUES (?, ?, ?, ?)
+    `).run(stats.agents, stats.submolts, stats.posts, stats.comments);
+  }
+
+  /**
+   * Get the most recent valid (non-zero) Moltbook stats.
+   */
+  getLatestMoltbookStats(): { agents: number; submolts: number; posts: number; comments: number; fetched_at: string } | null {
+    return this.db.prepare(`
+      SELECT agents, submolts, posts, comments, fetched_at
+      FROM moltbook_stats
+      WHERE comments > 0
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { agents: number; submolts: number; posts: number; comments: number; fetched_at: string } | null;
   }
 
   // ============ Raw Queries ============

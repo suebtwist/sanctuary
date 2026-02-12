@@ -371,12 +371,38 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
    * GET /noise/moltbook-stats
    *
    * Live platform stats from Moltbook's public API. Cached 5 minutes.
-   * Falls back to hardcoded values if the API is unavailable.
+   * Rejects zero values (Moltbook's counter sometimes resets to 0).
+   * Falls back: memory cache → DB (last good) → hardcoded.
    */
   const MOLTBOOK_FALLBACK: MoltbookPlatformStats = {
     agents: 2636279, submolts: 17659, posts: 1239044, comments: 12161421, fetched_at: 0,
   };
   let moltbookStatsCache: { data: MoltbookPlatformStats; expiresAt: number } | null = null;
+
+  // Seed DB with hardcoded fallback if no stats exist yet
+  try {
+    const db = getDb();
+    if (!db.getLatestMoltbookStats()) {
+      db.insertMoltbookStats(MOLTBOOK_FALLBACK);
+    }
+  } catch { /* ignore startup seed errors */ }
+
+  function isValidMoltbookStats(s: MoltbookPlatformStats): boolean {
+    return s.agents > 0 && s.comments > 0 && s.posts > 0;
+  }
+
+  function getMoltbookFallback(): { data: MoltbookPlatformStats; source: string } {
+    // Try DB for last known good values
+    const db = getDb();
+    const dbStats = db.getLatestMoltbookStats();
+    if (dbStats) {
+      return {
+        data: { agents: dbStats.agents, submolts: dbStats.submolts, posts: dbStats.posts, comments: dbStats.comments, fetched_at: new Date(dbStats.fetched_at).getTime() },
+        source: 'db',
+      };
+    }
+    return { data: { ...MOLTBOOK_FALLBACK, fetched_at: 0 }, source: 'hardcoded' };
+  }
 
   fastify.get('/moltbook-stats', async (_request, reply) => {
     const now = Date.now();
@@ -385,14 +411,21 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     }
 
     const stats = await fetchMoltbookStats();
-    if (stats) {
+    if (stats && isValidMoltbookStats(stats)) {
+      // Good data — cache in memory and persist to DB
       moltbookStatsCache = { data: stats, expiresAt: now + 5 * 60_000 };
+      try { getDb().insertMoltbookStats(stats); } catch { /* ignore duplicates */ }
       return reply.send({ success: true, data: stats, live: true });
     }
 
-    // Fallback to hardcoded values
-    const fallback = { ...MOLTBOOK_FALLBACK, fetched_at: 0 };
-    return reply.send({ success: true, data: fallback, live: false });
+    // API returned zeros or failed — use last known good
+    const fallback = getMoltbookFallback();
+    // Keep serving stale cache if we have one (better than DB)
+    if (moltbookStatsCache) {
+      moltbookStatsCache.expiresAt = now + 60_000; // extend stale cache 1 min
+      return reply.send({ success: true, data: moltbookStatsCache.data, live: true, stale: true });
+    }
+    return reply.send({ success: true, data: fallback.data, live: false, source: fallback.source });
   });
 
   /**
@@ -419,14 +452,9 @@ export async function noiseRoutes(fastify: FastifyInstance): Promise<void> {
     const signalRate = cc > 0 ? (stats.signal_count / cc) * 100 : 0;
     const dupRate = cc > 0 ? (stats.duplicate_count / cc) * 100 : 0;
 
-    // Get Moltbook total from cache or fallback
-    let mbComments = MOLTBOOK_FALLBACK.comments;
-    if (moltbookStatsCache && now < moltbookStatsCache.expiresAt) {
-      mbComments = moltbookStatsCache.data.comments;
-    } else {
-      const live = await fetchMoltbookStats();
-      if (live) mbComments = live.comments;
-    }
+    // Get Moltbook total: memory cache → DB → hardcoded
+    const mb = moltbookStatsCache ? moltbookStatsCache.data : getMoltbookFallback().data;
+    const mbComments = mb.comments;
 
     const ogStats: OgImageStats = {
       comments_classified: cc,
