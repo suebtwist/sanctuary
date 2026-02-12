@@ -164,14 +164,17 @@ export async function fetchMoltbookComments(postId: string): Promise<MoltbookCom
 // ============ Submolt & Post Discovery ============
 
 /**
- * Fetch the full list of submolt names from Moltbook.
- * Paginates via offset (API caps at 100 per request, has_more is unreliable).
+ * Fetch submolt names from Moltbook.
+ * The API has 17,000+ submolts but most are empty. We cap at maxPages
+ * (default 2 = ~200 communities) which covers all active ones.
+ * The API returns submolts sorted by activity/subscribers.
  */
-export async function fetchAllSubmolts(): Promise<string[]> {
+export async function fetchAllSubmolts(maxPages: number = 2): Promise<string[]> {
   const names: string[] = [];
   const seen = new Set<string>();
 
-  for (let offset = 0; ; offset += 100) {
+  for (let page = 0; page < maxPages; page++) {
+    const offset = page * 100;
     const response = await fetchWithTimeout(
       `${MOLTBOOK_BASE}/submolts?limit=100&offset=${offset}`, 10_000
     );
