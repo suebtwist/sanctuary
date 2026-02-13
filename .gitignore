@@ -56,3 +56,4 @@ noise_export*
 *.tmp
 *.temp
 .cache/
+audit/

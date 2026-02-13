@@ -2559,8 +2559,8 @@ function buildHitsPage(data: HitsData): string {
 <style>
   :root { --bg: #0a0b0f; --surface: #13151c; --border: #1f2231; --text: #e2e4e9; --muted: #8b8fa3; --accent: #6366f1; --green: #22c55e; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 32px 24px; }
-  .wrap { max-width: 960px; margin: 0 auto; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 32px 24px; }
   h1 { font-size: 24px; margin-bottom: 8px; }
   .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 32px; }
@@ -2588,9 +2588,12 @@ function buildHitsPage(data: HitsData): string {
   .bar:hover { background: var(--green); }
   .bar-label { font-size: 8px; color: var(--muted); margin-top: 4px; }
   .scroll-table { max-height: 400px; overflow-y: auto; }
+  ${getSidebarCSS()}
 </style>
 </head>
 <body>
+${getSidebarHTML('home')}
+<div class="page-content">
 <div class="wrap">
   <h1>Site Analytics</h1>
   <p class="subtitle">Parsed from nginx access log &middot; current log file only</p>
@@ -2623,6 +2626,10 @@ function buildHitsPage(data: HitsData): string {
     </div>
   </div>
 </div>
+</div>
+<script>
+${getSidebarJS()}
+</script>
 </body>
 </html>`;
 }

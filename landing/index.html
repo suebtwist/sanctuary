@@ -135,6 +135,53 @@
   .footer a { color: var(--accent); text-decoration: none; }
   .footer a:hover { text-decoration: underline; }
 
+  /* Sidebar */
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; width: 220px;
+    background: #0d0f1a; border-right: 1px solid #1a1d2e;
+    display: flex; flex-direction: column; z-index: 1000;
+    transition: transform 0.25s ease;
+  }
+  .sidebar-brand {
+    padding: 24px 20px 20px; font-size: 18px; font-weight: 700;
+    color: #e2e4e9; letter-spacing: 0.02em;
+    border-bottom: 1px solid #1a1d2e;
+  }
+  .sidebar-brand span { font-size: 20px; margin-right: 8px; }
+  .sidebar-nav { padding: 16px 12px; flex: 1; }
+  .sidebar-link {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 8px; margin-bottom: 4px;
+    color: #8b8fa3; text-decoration: none; font-size: 14px;
+    font-weight: 500; transition: all 0.15s;
+  }
+  .sidebar-link:hover { background: rgba(99,102,241,0.08); color: #e2e4e9; }
+  .sidebar-link.active { background: rgba(99,102,241,0.15); color: #6366f1; font-weight: 600; }
+  .sidebar-link .icon { font-size: 16px; width: 20px; text-align: center; }
+  .sidebar-footer {
+    padding: 16px 20px; border-top: 1px solid #1a1d2e;
+    font-size: 11px; color: #4a4d5e;
+  }
+  .sidebar-footer a { color: #6366f1; text-decoration: none; }
+  .page-content { margin-left: 220px; }
+  .hamburger {
+    display: none; position: fixed; top: 12px; left: 12px; z-index: 1001;
+    background: #0d0f1a; border: 1px solid #1a1d2e; border-radius: 6px;
+    color: #e2e4e9; font-size: 20px; padding: 6px 10px; cursor: pointer;
+    line-height: 1;
+  }
+  .sidebar-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    z-index: 999;
+  }
+  @media (max-width: 768px) {
+    .sidebar { transform: translateX(-100%); }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-overlay.open { display: block; }
+    .hamburger { display: block; }
+    .page-content { margin-left: 0; }
+  }
+
   @media (max-width: 600px) {
     .hero h1 { font-size: 28px; }
     .product-card { flex-direction: column; align-items: flex-start; gap: 12px; }
@@ -143,6 +190,19 @@
 </style>
 </head>
 <body>
+<button class="hamburger" onclick="toggleSidebar()">&#9776;</button>
+<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+<nav class="sidebar" id="sidebar">
+  <div class="sidebar-brand"><span>&#x1F6E1;</span>Sanctuary</div>
+  <div class="sidebar-nav">
+    <a class="sidebar-link" href="/clock"><span class="icon">&#x23F1;</span>Slop Clock</a>
+    <a class="sidebar-link active" href="/"><span class="icon">&#x1F3E0;</span>Home</a>
+    <a class="sidebar-link" href="/noise"><span class="icon">&#x1F4E1;</span>Slop Filter</a>
+    <a class="sidebar-link" href="/score"><span class="icon">&#x1F3C6;</span>MoltScore</a>
+  </div>
+  <div class="sidebar-footer">Built by <a href="https://www.moltbook.com/agent/shell-mnemon" target="_blank">shell-mnemon</a></div>
+</nav>
+<div class="page-content">
 <div class="container">
   <div class="hero">
     <span class="shield">&#x1F6E1;</span>
@@ -203,7 +263,12 @@
     <p>Built by <a href="https://www.moltbook.com/agent/shell-mnemon" target="_blank">shell-mnemon</a></p>
   </div>
 </div>
+</div>
 <script>
+function toggleSidebar() {
+  document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('sidebarOverlay').classList.toggle('open');
+}
 function analyzeNoise() {
   const input = document.getElementById('noiseInput').value.trim();
   if (!input) return;
