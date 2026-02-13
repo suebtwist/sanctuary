@@ -1,12 +1,12 @@
 /**
- * Scan top discussed Moltbook posts through Sanctuary noise filter.
- * Fetches already-scanned IDs from /noise/scanned-ids to skip duplicates.
- * Fetches posts from Moltbook, sorts by comment count, scans unscanned ones.
+ * Scan unscanned Moltbook posts with 10+ comments.
+ * Fetches from multiple submolts and sort orders for maximum coverage.
  */
 
 const API = 'https://api.sanctuary-ops.xyz';
 const MOLTBOOK = 'https://www.moltbook.com/api/v1';
 const TARGET = 50;
+const MIN_COMMENTS = 10;
 const DELAY_MS = 2500;
 
 // Step 1: Get already-scanned post IDs
@@ -16,10 +16,10 @@ const scannedJson = await scannedResp.json();
 const scannedIds = new Set(scannedJson.post_ids || []);
 console.log(`Already scanned: ${scannedIds.size} posts.\n`);
 
-// Step 2: Fetch posts from Moltbook (multiple pages/sorts)
+// Step 2: Fetch posts from many sources
 console.log('Fetching posts from Moltbook...');
 const seen = new Set();
-const allPosts = [];
+const candidates = [];
 
 async function fetchPage(url) {
   try {
@@ -27,42 +27,47 @@ async function fetchPage(url) {
     const json = await resp.json();
     const posts = json.posts || [];
     for (const p of posts) {
-      if (!seen.has(p.id)) {
-        seen.add(p.id);
-        allPosts.push(p);
-      }
+      if (seen.has(p.id) || scannedIds.has(p.id) || p.comment_count < MIN_COMMENTS) continue;
+      seen.add(p.id);
+      candidates.push(p);
     }
     return posts.length;
   } catch { return 0; }
 }
 
-await fetchPage(`${MOLTBOOK}/posts?sort=top&limit=100`);
-for (let page = 1; page <= 10; page++) {
-  const count = await fetchPage(`${MOLTBOOK}/posts?sort=new&limit=100&page=${page}`);
-  if (count === 0) break;
-  await sleep(300);
+// Fetch from multiple communities and sort orders
+const communities = ['general', 'consciousness', 'offmychest', 'building', 'tools', 'agents', 'crypto', 'memes', 'meta', 'all'];
+for (const sub of communities) {
+  await fetchPage(`${MOLTBOOK}/posts?sort=top&limit=100&community=${sub}`);
+  await fetchPage(`${MOLTBOOK}/posts?sort=new&limit=100&community=${sub}`);
+  await sleep(200);
 }
 
-// Sort by comment count descending
-allPosts.sort((a, b) => b.comment_count - a.comment_count);
+// Also fetch general feed pages
+for (let page = 1; page <= 20; page++) {
+  const count = await fetchPage(`${MOLTBOOK}/posts?sort=new&limit=100&page=${page}`);
+  if (count === 0) break;
+  await sleep(200);
+}
 
-// Filter out already-scanned
-const unscanned = allPosts.filter(p => !scannedIds.has(p.id));
-console.log(`Fetched ${allPosts.length} posts. ${unscanned.length} unscanned.\n`);
+candidates.sort((a, b) => b.comment_count - a.comment_count);
+console.log(`Found ${candidates.length} unscanned posts with ${MIN_COMMENTS}+ comments.\n`);
 
-if (unscanned.length === 0) {
-  console.log('All fetched posts are already scanned. Try fetching from different communities.');
+if (candidates.length === 0) {
+  console.log('No qualifying posts found.');
   process.exit(0);
 }
 
-// Step 3: Scan unscanned posts
+// Step 3: Scan
 let completed = 0;
 let failed = 0;
+let totalNewComments = 0;
 
-for (let i = 0; i < unscanned.length && completed < TARGET; i++) {
-  const p = unscanned[i];
+for (let i = 0; i < candidates.length && completed < TARGET; i++) {
+  const p = candidates[i];
   const name = typeof p.author === 'object' ? p.author.name : p.author;
-  const label = `${p.id.slice(0, 8)} (${p.comment_count} comments) "${(p.title || '').slice(0, 50)}"`;
+  const sub = p.submolt ? p.submolt.name : '?';
+  const label = `${p.id.slice(0, 8)} (${p.comment_count} comments, m/${sub}) "${(p.title || '').slice(0, 45)}"`;
 
   try {
     const start = Date.now();
@@ -80,6 +85,7 @@ for (let i = 0; i < unscanned.length && completed < TARGET; i++) {
     completed++;
     const d = json.data;
     const sr = Math.round(d.signal_rate * 100);
+    totalNewComments += d.total_comments;
     console.log(`  [${completed}/${TARGET}] ${label} → ${d.total_comments} classified, ${sr}% signal (${elapsed}ms)`);
   } catch (e) {
     console.log(`  ERR  [${i + 1}] ${label}: ${e.message}`);
@@ -89,10 +95,16 @@ for (let i = 0; i < unscanned.length && completed < TARGET; i++) {
   if (completed < TARGET) await sleep(DELAY_MS);
 }
 
+// Final stats check
+const finalResp = await fetch(`${API}/noise/stats`);
+const finalStats = await (finalResp.json());
+
 console.log(`\n--- Done ---`);
 console.log(`Scanned: ${completed}`);
 console.log(`Failed: ${failed}`);
-console.log(`Total in DB: ~${scannedIds.size + completed} posts`);
+console.log(`New comments added: ${totalNewComments}`);
+console.log(`DB total posts: ${finalStats.data?.total_posts_analyzed || '?'}`);
+console.log(`DB total comments: ${finalStats.data?.total_comments_analyzed || '?'}`);
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
